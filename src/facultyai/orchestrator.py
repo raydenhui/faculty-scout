@@ -159,6 +159,11 @@ async def run_pipeline(
                                 "university": job["university"],
                                 "department": job.get("department"),
                                 "need_discovery": False,
+                                "_progress_callback": (
+                                    lambda pct, msg, _t=task, _p=progress: (
+                                        _p.update(_t, completed=pct, description=f"[blue]{msg}")
+                                    )
+                                ),
                             }
                             result = await agent.ainvoke(
                                 state,
@@ -195,6 +200,12 @@ async def run_pipeline(
                                 if not records:
                                     await db.update_job_status(jid, "failed", graph_error)
                                     failed += 1
+                                    _set_excel_status(
+                                        config.files.input_excel,
+                                        job["university"],
+                                        job.get("department"),
+                                        f"failed: {graph_error}",
+                                    )
                                     progress.update(task, advance=1)
                                     return
 

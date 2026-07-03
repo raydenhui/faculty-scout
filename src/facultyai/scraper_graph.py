@@ -404,7 +404,9 @@ def _run_scrapegraph_node(
     cache: CacheManager,
 ):
     async def _node(state: AgentState) -> AgentState:
-        return await _run_scraper_impl(state, config, schema, llm, cache)
+        # Pass progress_callback from state if available
+        cb = state.get("_progress_callback")
+        return await _run_scraper_impl(state, config, schema, llm, cache, progress_callback=cb)
 
     return _node
 
@@ -415,6 +417,7 @@ async def _run_scraper_impl(
     schema: Schema,
     llm: BaseChatModel,
     cache: CacheManager,
+    progress_callback: Any = None,
 ) -> AgentState:
     url = state.get("listing_url")
     if not url:
@@ -433,7 +436,15 @@ async def _run_scraper_impl(
     log.info("run_scraper start url=%s html_len=%d", url, len(html))
 
     try:
-        records = await scrape(url, html, schema, llm, config)
+        records = await scrape(url, html, schema, llm, config, progress_callback=progress_callback)
+
+        # Check for page-level error detected by LLM
+        if records and len(records) == 1 and isinstance(records[0], dict):
+            page_err = records[0].get("_page_error")
+            if page_err:
+                state["error"] = f"Listing page issue: {page_err}"
+                state["extracted_records"] = []
+                return state
 
         log.info("run_scraper done  records=%d", len(records))
         if records:

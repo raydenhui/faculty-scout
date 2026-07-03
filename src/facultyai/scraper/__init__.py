@@ -26,19 +26,17 @@ async def scrape(
     schema: Schema,
     llm: BaseChatModel,
     config: AppConfig,
+    progress_callback: Any = None,
 ) -> list[dict[str, Any]]:
-    """Extract faculty records from a listing page.
-
-    Cell 2a+2b: LLM analyzes listing page → item pattern, static values,
-                extraction methods per field, follow link selector.
-    Cell 3: Detail page extraction for missing fields (LLM only).
-    """
+    """Extract faculty records from a listing page."""
     field_names = [c.name for c in schema.extracted_columns()]
     mode = config.scraping.item_extract_mode
     log.info("scrape start url=%s html_len=%d fields=%d mode=%s",
              url, len(html), len(field_names), mode)
 
-    # Cell 2a + 2b (or direct mode): Analyze listing page
+    # 25%% — LLM is analyzing the listing page
+    _update_progress(progress_callback, 25, "LLM analyzing listing page...")
+
     analysis = await analyze_listing_page(llm, html, schema, url, mode=mode)
     if analysis is None:
         log.error("scrape listing analysis failed")
@@ -53,29 +51,41 @@ async def scrape(
         len(analysis.static_values),
     )
 
+    # Propagate page-level error to the state
+    if analysis.page_error:
+        log.warning("scrape page error: %s", analysis.page_error)
+        return [{"_page_error": analysis.page_error}]
+
     # Direct mode: use LLM-extracted records directly, skip split/extract
     if mode == "direct":
         records = analysis_dict.get("_direct_records", [])
-        # Normalize field names from LLM output (e.g., profile_url → Profile URL)
         records = _normalize_fields(records, field_names)
         log.info("scrape direct mode: %d records from LLM", len(records))
     else:
-        # Split mode: apply static values and extract from listing
         for field_name, value in analysis.static_values.items():
             if field_name in field_names:
                 analysis_dict.setdefault("extraction_methods", {})[field_name] = {
                     "method": "static", "pattern": str(value),
                 }
-
         records = await extract_fields_from_listing(html, analysis_dict, llm, field_names)
         log.info("scrape listing extraction: %d records", len(records))
 
+    # 50%% — listing page extraction done
+    has_detail = analysis.has_detail_pages and records
+    if has_detail:
+        _update_progress(progress_callback, 50,
+                         f"Extracted {len(records)} entries, visiting profile pages...")
+    else:
+        _update_progress(progress_callback, 100, f"Done — {len(records)} entries")
+
     # Cell 3: Detail page extraction for missing fields
-    if analysis.has_detail_pages and records:
+    if has_detail:
         records = await visit_detail_pages(
-            html, url, records, analysis_dict, field_names, schema, llm, config
+            html, url, records, analysis_dict, field_names, schema, llm, config,
+            progress_callback=progress_callback,
         )
         log.info("scrape after detail pages: %d records", len(records))
+        _update_progress(progress_callback, 100, f"Done — {len(records)} entries")
 
     # Strip internal profile_url from records (no longer needed)
     for rec in records:
@@ -83,6 +93,11 @@ async def scrape(
 
     log.info("scrape done url=%s records=%d", url, len(records))
     return records
+
+
+def _update_progress(callback: Any, pct: int, msg: str) -> None:
+    if callback:
+        callback(pct, msg)
 
 
 def _normalize_fields(records: list[dict[str, Any]], field_names: list[str]) -> list[dict[str, Any]]:

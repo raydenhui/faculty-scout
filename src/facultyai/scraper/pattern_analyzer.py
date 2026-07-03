@@ -64,9 +64,9 @@ def _unmap_records(records: list[dict[str, Any]], rev: dict[str, str]) -> list[d
     return records
 
 
-def _unmap_static_values(static_values: dict[str, str], rev: dict[str, str]) -> dict[str, str]:
+def _unmap_static_values(static_values: dict[str, str], fwd: dict[str, str]) -> dict[str, str]:
     """Convert field_N keys in static_values to real names."""
-    return {rev.get(k, k): v for k, v in static_values.items()}
+    return {fwd.get(k, k): v for k, v in static_values.items()}
 
 
 class ListingAnalysis:
@@ -80,6 +80,7 @@ class ListingAnalysis:
         self.follow_link_selector: str = raw.get("follow_link_selector", "")
         self.has_detail_pages: bool = raw.get("has_detail_pages", bool(self.follow_link_selector))
         self._direct_records: list[dict[str, Any]] = raw.get("_direct_records", [])
+        self.page_error: str = raw.get("page_error", "")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -90,6 +91,7 @@ class ListingAnalysis:
             "follow_link_selector": self.follow_link_selector,
             "has_detail_pages": self.has_detail_pages,
             "_direct_records": self._direct_records,
+            "page_error": self.page_error,
         }
 
 
@@ -112,8 +114,8 @@ async def analyze_listing_page(
 
     item_selector = step1_result.get("item_selector", "")
     item_regex = step1_result.get("item_regex", "")
-    _, rev = _field_map(schema)
-    static_values = _unmap_static_values(step1_result.get("static_values", {}), rev)
+    fwd, rev = _field_map(schema)
+    static_values = _unmap_static_values(step1_result.get("static_values", {}), fwd)
 
     log.info("Cell 2a done: selector=%s, statics=%d",
              item_selector or item_regex, len(static_values))
@@ -300,7 +302,11 @@ Missing value rules — use different values for different situations:
 - Also find each person's profile/detail page link as "profile_url".
   If no profile link exists for a person, set it to null.
 
-Return ONLY a JSON object:
+Return ONLY a JSON object. If the page is NOT a faculty listing (e.g., error page,
+Cloudflare challenge, redirect, empty page, or any page without faculty information),
+set "error" to a short description and leave records empty.
+Otherwise, omit the "error" field:
+
 {{
   "static_values": {{"field_6": "Department of Computer Science"}},
   "records": [
@@ -308,7 +314,8 @@ Return ONLY a JSON object:
       {example_fields},
       "profile_url": "https://..."
     }}
-  ]
+  ],
+  "error": null
 }}
 
 HTML:
@@ -337,17 +344,20 @@ HTML:
         return None
 
     records = data.get("records", [])
-    static_values = _unmap_static_values(data.get("static_values", {}), rev)
+    static_values = _unmap_static_values(data.get("static_values", {}), fwd)
+    llm_error = data.get("error")
+    if llm_error:
+        log.warning("direct mode LLM reported error: %s", llm_error)
+
     log.info("direct mode: %d records, %d static values", len(records), len(static_values))
 
-    # Direct mode: records have profile URLs from LLM; set has_detail_pages
-    # so Cell 3 can fill any remaining gaps from those URLs
     return ListingAnalysis({
         "item_selector": "",
         "item_regex": "",
         "extraction_methods": {},
         "static_values": static_values,
-        "follow_link_selector": "",      # not needed — profile URLs in records
-        "has_detail_pages": True,        # allow Cell 3 for missing fields
+        "follow_link_selector": "",
+        "has_detail_pages": True,
         "_direct_records": records,
+        "page_error": llm_error or "",
     })

@@ -38,6 +38,7 @@ async def visit_detail_pages(
     schema: Schema,
     llm: BaseChatModel,
     config: AppConfig,
+    progress_callback: Any = None,
 ) -> list[dict[str, str]]:
     """LLM-only detail page extraction. None for truly unfound fields."""
     follow_selector = analysis.get("follow_link_selector", "")
@@ -81,32 +82,49 @@ async def visit_detail_pages(
 
     log.info("visit_detail_pages missing fields: %s", missing_fields)
 
-    # Process detail pages (capped at 50 for performance)
+    # Process detail pages sequentially with consecutive-failure detection
     to_process = detail_urls[:50]
     log.info("visit_detail_pages processing %d detail pages", len(to_process))
 
+    consecutive_failures = 0
     sem = asyncio.Semaphore(MAX_CONCURRENT)
 
-    async def _process(idx: int, url: str) -> None:
+    async def _process(idx: int, url: str) -> bool:
+        nonlocal consecutive_failures
         async with sem:
             html = await _fetch_one_url(url, config)
             if not html or len(html) < 500:
                 _add_remark(records[idx], f"Detail page unreachable: {url}")
-                return
+                return False
 
             result = await _llm_extract_detail(clean_html(html), extract_fields, schema, url, llm)
             if result is None:
                 _add_remark(records[idx], f"LLM extraction failed for: {url}")
-                return
+                return False
 
+            got_data = False
             for field_name, value in result.items():
                 if value is None:
-                    _add_remark(records[idx], f"{field_name}: not found on profile page")
+                    pass  # LLM decides what goes in Remark
                 elif field_name in records[idx] and records[idx].get(field_name) in (None, "") and value:
                     records[idx][field_name] = str(value)
+                    got_data = True
+            return got_data
 
-    tasks = [_process(idx, url) for idx, url in to_process]
-    await asyncio.gather(*tasks)
+    for processed, (idx, url) in enumerate(to_process, 1):
+        success = await _process(idx, url)
+        if success:
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
+            if consecutive_failures >= 5:
+                log.info("visit_detail_pages abandoning after %d consecutive failures", consecutive_failures)
+                _add_remark(records[idx], f"Abandoned detail pages after {consecutive_failures} consecutive failures")
+                break
+        # Update progress: 50%% + (processed/total) * 50%%
+        if progress_callback:
+            pct = 50 + int(50 * processed / len(to_process))
+            progress_callback(pct, f"Profile pages: {processed}/{len(to_process)}")
 
     return records
 
@@ -139,11 +157,19 @@ Rules:
 - Find email in text, mailto: links, or [@] / [at] obfuscation patterns.
 - Look for title prefixes (Prof., Dr., Mr., Ms.) near the person's name.
 
-HTML:
-{html}
+If the page is NOT a faculty profile (e.g., an error page, Cloudflare challenge, redirect, homepage,
+or any page that does not contain individual faculty information), set "error" to a description.
+Otherwise, omit the "error" field.
 
-Return ONLY a JSON object with field names as keys. Use null for missing values.
-Example: {{"Email": "prof@cuhk.edu.hk", "Chinese Full Name": null}}"""
+Return ONLY a JSON object:
+{{
+  "field_1": "value or null",
+  "field_2": "value or null",
+  "error": null
+}}
+
+HTML:
+{html}"""
 
     try:
         _llm_log.info("===== detail_extract PROMPT =====\n%s\n===== END PROMPT =====", prompt)
@@ -163,7 +189,10 @@ Example: {{"Email": "prof@cuhk.edu.hk", "Chinese Full Name": null}}"""
     try:
         data = json.loads(m.group())
         if isinstance(data, dict):
-            return {k: (None if v is None else str(v)) for k, v in data.items()}
+            if data.get("error"):
+                log.info("_llm_extract_detail LLM reported error for %s: %s", url, data["error"])
+                return None
+            return {k: (None if v is None else str(v)) for k, v in data.items() if k != "error"}
     except json.JSONDecodeError:
         log.warning("_llm_extract_detail invalid JSON for %s", url)
 
