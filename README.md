@@ -1,166 +1,139 @@
 # FacultyAI
 
-AI-driven async CLI tool that autonomously scrapes university faculty information. Given a university name and optionally a department, it discovers the faculty listing page, extracts structured data, and writes results to an Excel file.
+AI-driven CLI tool that scrapes university faculty information from listing pages and exports structured data.
 
-## Quick Start
+## Schema Configuration (`schema.json`)
 
-```bash
-pip install -e .
-playwright install chromium
+### Column Types
 
-# Set API key
-export OPENAI_API_KEY="sk-..."
+| Type | Description |
+|------|-------------|
+| `extracted` | Value extracted from HTML by LLM. The LLM chooses `selector`, `regex`, `llm`, or `static` extraction method per field. |
+| `static` | Value filled from system-provided metadata. Use `value_from` to specify the metadata key. |
+| `formula` | Excel formula using `[@[Column Name]]` syntax. |
 
-# Validate and run
-facultyai config validate
-facultyai run
+### Available Static Metadata Keys
+
+These keys can be referenced in `value_from` for `static` columns:
+
+| Key | Value | Source |
+|-----|-------|--------|
+| `university_name` | The university name as entered in the input Excel file | `universities.xlsx` university column |
+
+### Validation Rules (Optional)
+
+Each column can have a `validation` object:
+
+| Rule | Type | Description |
+|------|------|-------------|
+| `regex` | string | Value must match this regex pattern |
+| `max_length` | int | Maximum character length |
+| `min_length` | int | Minimum character length |
+| `contains_cjk` | bool | Value must contain CJK characters (Chinese, Japanese, Korean) |
+| `url_like` | bool | Value must start with `http://` or `https://` |
+
+### Dedup Keys (`dedup_keys`)
+
+Top-level array specifying which columns identify a row for Excel replacement.
+When the exporter writes incremental results, it removes existing rows whose
+values in these columns match the new data.
+
+```json
+{
+  "columns": [...],
+  "dedup_keys": ["Institution", "Department"]
+}
 ```
 
-## How It Works
+The merge logic: load existing Excel → find each dedup key's column → remove rows
+where ALL dedup values match → append new rows at the bottom.
 
-```
-universities.xlsx ──► Input sync ──► SQLite DB
-                                        │
-                          ┌─────────────┼─────────────┐
-                          ▼             ▼             ▼
-                    Discovery Jobs   Scrape Jobs   Resume/Retry
-                          │             │
-                          ▼             ▼
-                    LangGraph Agent (checkpointed)
-                          │
-                ┌─────────┼─────────┐
-                ▼         ▼         ▼
-          DuckDuckGo   LLM call   ScrapeGraphAI / Playwright
-                │         │         │
-                └─────────┼─────────┘
-                          ▼
-                    faculty_data.xlsx
-```
+### Null vs Empty String in LLM Extraction
 
-## Configuration (`config.yaml`)
+The LLM uses different values to signal extraction status:
 
-```yaml
-llm:
-  provider: deepseek          # openai, azure, anthropic, google, local
-  model: deepseek-chat
-  api_key: ${DEEPSEEK_API_KEY}
-  base_url: https://api.deepseek.com/v1
+| Value | Meaning | Triggers detail page? |
+|-------|---------|----------------------|
+| `"actual value"` | Extracted successfully | No |
+| `""` (empty string) | Field not applicable to this person | No |
+| `null` | Field should exist but not visible on listing page | **Yes** — visits profile page |
 
-search:
-  provider: duckduckgo        # or bing (needs api_key)
-
-scraping:
-  max_concurrent_jobs: 3      # parallel scraping
-  max_retries_per_step: 3     # auto-retry on failure
-
-department:
-  discovery_enabled: true     # auto-discover departments
-```
-
-## Input File (`universities.xlsx`)
-
-Sheet `universities` with columns:
-
-| university_name | department_name | extra_info |
-|---|---|---|
-| MIT | Electrical Engineering & CS | |
-| Stanford | | discover all |
-| UC Berkeley | Computer Science | berkeley.edu/cs |
-
-Blank `department_name` → auto-discovers all departments.
-`extra_info` → search hints.
-
-## Schema File (`schema.json`)
+### Example Schema
 
 ```json
 {
   "columns": [
-    {"name": "Full Name",   "type": "extracted", "hint": "Professor's full name"},
-    {"name": "Last Name",   "type": "formula",   "formula": "=TEXTAFTER([@[Full Name]],\" \")"},
-    {"name": "Email",       "type": "extracted", "hint": "Email address"},
-    {"name": "Institution", "type": "static",    "value_from": "university_name"}
-  ]
+    {
+      "name": "English Full Name",
+      "type": "extracted",
+      "hint": "The professor's full name in English",
+      "validation": { "max_length": 100 }
+    },
+    {
+      "name": "Email",
+      "type": "extracted",
+      "hint": "Email address",
+      "validation": { "regex": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$" }
+    },
+    {
+      "name": "Institution",
+      "type": "static",
+      "value_from": "university_name"
+    },
+    {
+      "name": "Remark",
+      "type": "extracted",
+      "hint": "Tracking notes for fields that could not be found"
+    }
+  ],
+  "dedup_keys": ["Institution", "Department"]
 }
 ```
 
-- **extracted** — scraped by AI (`hint` guides the prompt)
-- **formula** — Excel formula using `[@[Column Name]]` references
-- **static** — constant value or `value_from` university name
+## Input Excel (`universities.xlsx`)
 
-## Commands
+The input file defines which universities and departments to scrape.
 
-| Command | Description |
-|---|---|
-| `facultyai run` | Run all pending jobs |
-| `facultyai run --retry-failed` | Run pending + retry failed jobs |
-| `facultyai resume` | Resume after interruption |
-| `facultyai resume --retry-failed` | Resume + retry failed |
-| `facultyai retry MIT EECS` | Retry a specific job |
-| `facultyai status` | Job statuses + run history |
-| `facultyai export` | Regenerate output Excel |
-| `facultyai chat` | Interactive REPL |
-| `facultyai config validate` | Validate config |
-| `facultyai config show` | Show masked config |
+| Column | Required | Description |
+|--------|----------|-------------|
+| `university_name` | Yes | University name (e.g., "CityUHK", "CUHK") |
+| `department_name` | No | Department name (e.g., "Computer Science"). If omitted, triggers department discovery. |
+| `status` | No | Empty = scrape. Any value (e.g., "completed") = skip. Clear the cell to re-scrape. |
 
-## Typical Workflow
+## Configuration (`config.yaml`)
+
+Key settings:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `llm.provider` | `deepseek` | LLM provider (openai, deepseek, anthropic, google) |
+| `llm.model` | `deepseek-v4-flash` | Model name |
+| `search.provider` | `duckduckgo` | Search engine for URL discovery |
+| `scraping.item_extract_mode` | `split` | `split` = CSS selector item separation + per-field methods. `direct` = LLM outputs all items in one JSON. |
+| `scraping.max_detail_pages` | `5` | Detail pages to analyze for extraction patterns |
+| `scraping.max_concurrent_jobs` | `3` | Number of concurrent scrape jobs |
+| `files.cache_ttl_url` | `604800` | URL content cache TTL in seconds (7 days). Set to `0` to disable. |
+| `output.unique_keys` | `["Email", "English Full Name"]` | Keys used for DB record deduplication |
+| `output.archive_after_not_found_runs` | `3` | Archive records not seen after N runs |
+
+## Usage
 
 ```bash
-facultyai run                    # first run
-facultyai status                 # check progress
-facultyai run --retry-failed     # retry failures
-facultyai resume                 # recover from crash
-facultyai export                 # manual export
+# Run all universities in input Excel (skips rows with status filled)
+python -m facultyai run
+
+# Run with debug logging (full LLM prompts + responses)
+python -m facultyai run --debug
+
+# Re-scrape: clear the "status" column in universities.xlsx and run again
+# Each completed job writes "completed" back to the Excel status column.
+
+# Check job status and run history
+python -m facultyai status
+
+# Export from database
+python -m facultyai export
+
+# Resume incomplete jobs
+python -m facultyai resume
 ```
-
-## Chat REPL
-
-`facultyai chat` — slash commands: `/list`, `/jobs`, `/schema`,
-`/add-col`, `/export`, `/config`, `/help`. Natural language also works.
-
-## Resume & Crash Recovery
-
-LangGraph SQLite checkpointing persists state after each node to `facultyai.db`.
-`facultyai resume` picks up from the last checkpoint — no duplicate work.
-
-## LLM Providers
-
-| Provider | Config notes |
-|---|---|
-| DeepSeek | `provider: deepseek`, set `base_url` |
-| OpenAI | `provider: openai`, set `api_key` |
-| Azure | `provider: azure`, set `azure_endpoint` |
-| Anthropic | `provider: anthropic` |
-| Google | `provider: google` |
-| Local/Ollama | `provider: openai_compatible`, `base_url: http://localhost:11434/v1` |
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `config.yaml` | All settings |
-| `universities.xlsx` | Input list |
-| `schema.json` | Output column definitions |
-| `faculty_data.xlsx` | Output spreadsheet |
-| `facultyai.db` | SQLite database (source of truth) |
-| `cache/` | Page and LLM response cache |
-
-## Troubleshooting
-
-| Problem | Solution |
-|---|---|
-| "Another process is running" | Delete `facultyai.lock` |
-| API key errors | Check env var or `config.yaml` |
-| No search results | Add `request_delay_sec` or switch to Bing |
-| No faculty extracted | Add `extra_info` hints in Excel input |
-| Excel formula broken | Verify column names match `schema.json` |
-| ScrapeGraphAI error | Set `use_scrapegraphai: false` in config |
-
-## Requirements
-
-- Python 3.11+
-- Chromium browser (auto-installed by `playwright install chromium`)
-- API key for an LLM provider (or a local model)
-
-## License
-
-MIT

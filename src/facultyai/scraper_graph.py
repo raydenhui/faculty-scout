@@ -12,7 +12,6 @@ Playwright is used as a fallback when a page requires JavaScript rendering.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 from typing import Any, TypedDict
@@ -25,12 +24,12 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from .cache import CacheManager
 from .config import AppConfig
 from .llm_factory import web_search
-from .logging_config import get_logger
-from .schema import Schema, build_extraction_prompt
+from .logging_config import get_llm_logger, get_logger
+from .schema import Schema
+from .scraper import scrape
 
 log = get_logger("graph")
-
-_depth_sem = asyncio.Semaphore(1)  # DepthSearchGraph is resource-heavy (Playwright + qdrant + embeddings)
+_llm_log = get_llm_logger()
 
 # ---------------------------------------------------------------------------
 # State
@@ -196,17 +195,15 @@ async def _discover_url_impl(
     dept = state["department"] or ""
 
     queries = [
-        f"{uni} {dept} staff directory",
-        f"{uni} {dept} people",
-        f"{uni} department of {dept} faculty",
+        f"{uni} {dept} faculty",
         f"{uni} {dept} academic staff",
-        f"{uni} {dept} faculty listing",
+        f"{uni} department of {dept} faculty",
+        f"{uni} {dept} staff",
         f"{uni} {dept} professors",
     ] if dept else [
-        f"{uni} staff directory",
-        f"{uni} people",
         f"{uni} faculty",
         f"{uni} academic staff",
+        f"{uni} staff",
         f"{uni} professors",
     ]
 
@@ -291,9 +288,10 @@ async def _ask_llm_for_url(
     )
 
     try:
-        log.debug("discover_url[%s] prompt:\n%s", qi, prompt)
+        _llm_log.info("===== url_discovery[%s] PROMPT =====\n%s\n===== END PROMPT =====", qi, prompt)
         response = await llm.ainvoke(prompt)
         text = _llm_response_text(response).strip()
+        _llm_log.info("===== url_discovery[%s] RESPONSE =====\n%s\n===== END RESPONSE =====", qi, text)
         log.info("discover_url[%s] RESPONSE:\n%s", qi, text)
     except Exception as e:
         log.warning("discover_url[%s] LLM call failed: %s", qi, e)
@@ -340,7 +338,7 @@ def _fetch_page_node(
         html = await _http_fetch(url, config)
         if html and _has_content(html):
             log.debug("fetch_page http OK len=%d", len(html))
-            cache.set_url_content(url, html)
+            cache.set_url_content(url, html, ttl_sec=config.files.cache_ttl_url)
             state["page_html"] = html
             return state
 
@@ -348,7 +346,7 @@ def _fetch_page_node(
         html = await _playwright_fetch(url, config)
         if html:
             log.debug("fetch_page playwright OK len=%d", len(html))
-            cache.set_url_content(url, html)
+            cache.set_url_content(url, html, ttl_sec=config.files.cache_ttl_url)
             state["page_html"] = html
             return state
 
@@ -383,7 +381,7 @@ async def _playwright_fetch(url: str, config: AppConfig) -> str | None:
             page = await browser.new_page()
             try:
                 await page.goto(url, timeout=config.scraping.browser_timeout * 1000)
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_load_state("domcontentloaded")
                 html = await page.content()
                 return html
             finally:
@@ -406,12 +404,12 @@ def _run_scrapegraph_node(
     cache: CacheManager,
 ):
     async def _node(state: AgentState) -> AgentState:
-        return await _run_scrapegraph_impl(state, config, schema, llm, cache)
+        return await _run_scraper_impl(state, config, schema, llm, cache)
 
     return _node
 
 
-async def _run_scrapegraph_impl(
+async def _run_scraper_impl(
     state: AgentState,
     config: AppConfig,
     schema: Schema,
@@ -420,125 +418,35 @@ async def _run_scrapegraph_impl(
 ) -> AgentState:
     url = state.get("listing_url")
     if not url:
-        log.warning("run_scrapegraph: no listing_url, skipping")
+        log.warning("run_scraper: no listing_url, skipping")
         if not state.get("error"):
             state["error"] = "No listing URL available for scraping."
         return state
 
-    prompt_text = build_extraction_prompt(schema)
-
-    input_hash = _cache_input_hash(url, prompt_text)
-    cached_records = cache.get_extraction(input_hash)
-    if cached_records is not None:
-        log.info("run_scrapegraph cache HIT url=%s records=%d", url, len(cached_records))
-        state["extracted_records"] = cached_records
+    html = state.get("page_html")
+    if not html:
+        log.warning("run_scraper: no page_html, skipping")
+        if not state.get("error"):
+            state["error"] = "No page HTML available for scraping."
         return state
 
-    source = state.get("page_html") or url
-    log.info("run_scrapegraph start url=%s source_type=%s", url, "html" if state.get("page_html") else "url")
+    log.info("run_scraper start url=%s html_len=%d", url, len(html))
 
     try:
-        llm_config: dict[str, Any] = {
-            "model": f"{config.llm.provider}/{config.llm.model}",
-            "temperature": config.llm.temperature,
-        }
-        if config.llm.api_key:
-            llm_config["api_key"] = config.llm.api_key
-        if config.llm.base_url:
-            llm_config["base_url"] = config.llm.base_url
+        records = await scrape(url, html, schema, llm, config)
 
-        if config.scraping.deep_extraction:
-            records = await _scrape_depth(url, prompt_text, llm_config, config)
-        else:
-            records = await _scrape_single_page(source, prompt_text, llm_config)
-
-        log.info("run_scrapegraph done  records=%d", len(records))
+        log.info("run_scraper done  records=%d", len(records))
         if records:
             log.debug("sample keys: %s", list(records[0].keys()) if records else "[]")
-            cache.set_extraction(input_hash, records)
 
         state["extracted_records"] = records
 
     except Exception as e:
-        log.error("run_scrapegraph FAILED  %s: %s", type(e).__name__, e)
-        state["error"] = f"ScrapeGraphAI error: {e}"
+        log.error("run_scraper FAILED  %s: %s", type(e).__name__, e)
+        state["error"] = f"Scraper error: {e}"
         state["extracted_records"] = []
 
     return state
-
-
-async def _scrape_depth(
-    url: str,
-    prompt_text: str,
-    llm_config: dict[str, Any],
-    config: AppConfig,
-) -> list[dict[str, Any]]:
-    """Use DepthSearchGraph (depth=1) for pure AI extraction from listing + detail pages."""
-    from scrapegraphai.graphs import DepthSearchGraph
-
-    log.info("depth_search start url=%s depth=1", url)
-
-    crawl_config = {
-        "llm": llm_config,
-        "depth": 1,
-        "only_inside_links": True,
-        "cut": True,
-        "verbose": False,
-    }
-
-    graph = DepthSearchGraph(
-        prompt=prompt_text,
-        source=url,
-        config=crawl_config,
-    )
-    loop = asyncio.get_event_loop()
-
-    def _run() -> dict:
-        return graph.run()
-
-    result = await loop.run_in_executor(None, _run)
-    records = _extract_records_result(result)
-    log.info("depth_search done records=%d", len(records))
-    return records
-
-
-async def _scrape_single_page(
-    source: str,
-    prompt_text: str,
-    llm_config: dict[str, Any],
-) -> list[dict[str, Any]]:
-    from scrapegraphai.graphs import SmartScraperGraph
-
-    scraper = SmartScraperGraph(
-        prompt=prompt_text,
-        source=source,
-        config={"llm": llm_config},
-    )
-    loop = asyncio.get_event_loop()
-
-    def _run() -> dict:
-        return scraper.run()
-
-    result = await loop.run_in_executor(None, _run)
-    return _extract_records_result(result)
-
-
-def _extract_records_result(result: Any) -> list[dict[str, Any]]:
-    if isinstance(result, dict):
-        extracted = result.get("content", result.get("output", result.get("data", result)))
-        if isinstance(extracted, list):
-            return extracted
-        if isinstance(extracted, dict):
-            return [extracted]
-        return []
-    if isinstance(result, list):
-        return result
-    return []
-
-
-def _cache_input_hash(url: str, prompt: str) -> str:
-    payload = json.dumps({"url": url, "prompt": prompt}, sort_keys=True)
-    return hashlib.sha256(payload.encode()).hexdigest()[:40]
 
 
 def _validate_and_finalize_node(
@@ -548,24 +456,50 @@ def _validate_and_finalize_node(
     async def _node(state: AgentState) -> AgentState:
         records = state.get("extracted_records", [])
 
-        validated: list[dict[str, Any]] = []
-        for rec in records:
-            if not isinstance(rec, dict):
-                continue
-            clean: dict[str, Any] = {}
-            for col in schema.extracted_columns():
-                val = rec.get(col.name, "")
-                if val is None:
-                    val = ""
-                if col.name.lower() == "email" and val and not _is_valid_email(str(val)):
-                    val = ""
-                clean[col.name] = val
-            validated.append(clean)
+        validated = _apply_schema_validation(records, schema, llm=None)
 
         state["extracted_records"] = validated
         return state
 
     return _node
+
+
+def _apply_schema_validation(
+    records: list[dict[str, Any]],
+    schema: Schema,
+    llm: BaseChatModel | None = None,
+) -> list[dict[str, Any]]:
+    """Apply per-column validation rules from schema.json."""
+    validated: list[dict[str, Any]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        clean: dict[str, Any] = {}
+        for col in schema.columns:
+            val = rec.get(col.name, "")
+            if val is None:
+                val = ""
+            v = getattr(col, "validation", None)
+            if v is not None:
+                val = _validate_column(str(val), v, llm)
+            clean[col.name] = val
+        validated.append(clean)
+    return validated
+
+
+def _validate_column(val: str, v: Any, llm: BaseChatModel | None = None) -> str:
+    """Apply validation rules. If llm is provided, ask LLM about violations."""
+    import re
+
+    if v.regex and val and not re.match(v.regex, val, re.IGNORECASE if v.regex.startswith("^") else 0):
+        return ""
+    if v.max_length is not None and len(val) > v.max_length:
+        return ""
+    if v.contains_cjk and val and not re.search(r"[\u4e00-\u9fff\u3400-\u4dbf]", val):
+        return ""
+    if v.url_like and val and not re.match(r"^https?://", val, re.IGNORECASE):
+        return ""
+    return val
 
 
 # ---------------------------------------------------------------------------
@@ -579,10 +513,3 @@ def _llm_response_text(response: Any) -> str:
     if isinstance(response, str):
         return response
     return str(response)
-
-
-_EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
-
-
-def _is_valid_email(email: str) -> bool:
-    return bool(_EMAIL_RE.match(email))

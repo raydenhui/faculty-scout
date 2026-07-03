@@ -33,9 +33,13 @@ htmlcov/
 *.swp
 
 # Project data files
-facultyai.db
+*.db
 faculty_data.xlsx
 universities.xlsx
 cache/
 
+# Specs
 /spec
+
+# Logs
+*.log

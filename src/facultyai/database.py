@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS input_universities (
     university TEXT NOT NULL,
     department TEXT,
     extra_info TEXT,
+    status TEXT,
     added_at TEXT DEFAULT (datetime('now')),
     UNIQUE(university, department)
 );
@@ -129,12 +130,25 @@ class Database:
         self._connection.row_factory = aiosqlite.Row
         await self._connection.executescript(_SCHEMA_SQL)
         await self._connection.commit()
+        await self._migrate()
         return self
 
     async def close(self) -> None:
         if self._connection:
             await self._connection.close()
             self._connection = None
+
+    async def _migrate(self) -> None:
+        """Apply schema migrations for columns added after initial release."""
+        assert self._connection is not None
+        # Migration: add status column to input_universities if missing
+        cur = await self._connection.execute("PRAGMA table_info(input_universities)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if "status" not in cols:
+            await self._connection.execute(
+                "ALTER TABLE input_universities ADD COLUMN status TEXT"
+            )
+            await self._connection.commit()
 
     async def __aenter__(self) -> Database:
         return await self.connect()
@@ -149,16 +163,18 @@ class Database:
         university: str,
         department: str | None = None,
         extra_info: str | None = None,
+        status: str | None = None,
     ) -> None:
         assert self._connection is not None
         await self._connection.execute(
             """
-            INSERT INTO input_universities(university, department, extra_info)
-            VALUES (?, ?, ?)
+            INSERT INTO input_universities(university, department, extra_info, status)
+            VALUES (?, ?, ?, ?)
             ON CONFLICT(university, department) DO UPDATE SET
-                extra_info=excluded.extra_info
+                extra_info=excluded.extra_info,
+                status=excluded.status
             """,
-            (university, department, extra_info),
+            (university, department, extra_info, status),
         )
         await self._connection.commit()
 
@@ -285,7 +301,7 @@ class Database:
     async def get_active_faculty(self) -> list[dict[str, Any]]:
         assert self._connection is not None
         async with self._connection.execute(
-            "SELECT * FROM faculty WHERE status='active' ORDER BY university, department"
+            "SELECT * FROM faculty WHERE status='active' ORDER BY university, department, rowid"
         ) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
@@ -296,13 +312,13 @@ class Database:
         assert self._connection is not None
         if department is not None:
             async with self._connection.execute(
-                "SELECT * FROM faculty WHERE university=? AND department=? ORDER BY record_id",
+                "SELECT * FROM faculty WHERE university=? AND department=? AND status='active' ORDER BY rowid",
                 (university, department),
             ) as cursor:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
         async with self._connection.execute(
-            "SELECT * FROM faculty WHERE university=? ORDER BY record_id", (university,)
+            "SELECT * FROM faculty WHERE university=? AND status='active' ORDER BY rowid", (university,)
         ) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]

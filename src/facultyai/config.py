@@ -49,6 +49,7 @@ class ScrapingConfig(BaseModel):
     use_scrapegraphai: bool = True
     deep_extraction: bool = False
     max_detail_pages: int = 10
+    item_extract_mode: str = "split"
 
 
 class FilesConfig(BaseModel):
@@ -57,6 +58,7 @@ class FilesConfig(BaseModel):
     schema_file: str = "schema.json"
     database: str = "facultyai.db"
     cache_dir: str = "./cache"
+    cache_ttl_url: int = 604800
 
 
 class OutputConfig(BaseModel):

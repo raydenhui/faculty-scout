@@ -3,7 +3,8 @@
     {
       "name": "Title",
       "type": "extracted",
-      "hint": "The professor's title, e.g. Dr., Prof., etc."
+      "hint": "The professor's title, e.g. Dr., Prof., etc.",
+      "validation": { "max_length": 30 }
     },
     {
       "name": "English Full Name",
@@ -19,12 +20,14 @@
     {
       "name": "Email",
       "type": "extracted",
-      "hint": "Email address, usually from the university domain"
+      "hint": "Email address, usually from the university domain",
+      "validation": { "regex": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$" }
     },
     {
       "name": "Department",
       "type": "extracted",
-      "hint": "The official department name"
+      "hint": "The official department name",
+      "validation": { "max_length": 100 }
     },
     {
       "name": "Institution",
@@ -32,9 +35,10 @@
       "value_from": "university_name"
     },
     {
-      "name": "Profile URL",
+      "name": "Remark",
       "type": "extracted",
-      "hint": "Link to the person's profile page"
+      "hint": "Tracking notes for fields that could not be found"
     }
-  ]
+  ],
+  "dedup_keys": ["Institution", "Department"]
 }

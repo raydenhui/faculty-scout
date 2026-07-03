@@ -3,8 +3,6 @@
 Parses ``schema.json`` and resolves column types (extracted, formula, static).
 """
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import Any, Literal
@@ -12,6 +10,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 ColumnType = Literal["extracted", "formula", "static"]
+
+
+class ColumnValidation(BaseModel):
+    regex: str | None = None
+    max_length: int | None = None
+    min_length: int | None = None
+    contains_cjk: bool | None = None
+    url_like: bool | None = None
 
 
 class ColumnDef(BaseModel):
@@ -22,6 +28,7 @@ class ColumnDef(BaseModel):
     comment: str | None = None
     value: Any | None = None
     value_from: str | None = None
+    validation: ColumnValidation | None = None
 
     def is_extracted(self) -> bool:
         return self.type == "extracted"
@@ -35,6 +42,7 @@ class ColumnDef(BaseModel):
 
 class Schema(BaseModel):
     columns: list[ColumnDef] = Field(default_factory=list)
+    dedup_keys: list[str] = Field(default_factory=list)
 
     def extracted_columns(self) -> list[ColumnDef]:
         return [c for c in self.columns if c.is_extracted()]

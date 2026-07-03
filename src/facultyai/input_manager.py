@@ -22,26 +22,19 @@ async def sync_input_excel(
     excel_path: str | Path,
     sheet_name: str | int = 0,
 ) -> tuple[int, int]:
-    """Import rows from *excel_path* into ``input_universities``.
-
-    *sheet_name* defaults to ``0`` (first sheet).
-    Returns ``(inserted_or_updated, deleted)``.
-    """
+    """Import rows from *excel_path* into ``input_universities``."""
     path = Path(excel_path)
     if not path.exists():
         return 0, 0
 
     df = pd.read_excel(path, sheet_name=sheet_name)
     df = df.where(pd.notna(df), None)  # type: ignore[assignment]
-
-    # Normalise column names
     df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
 
     required = {"university_name"}
     if not required.issubset(df.columns):
         raise ValueError(f"Missing required column(s): {required - set(df.columns)}")
 
-    # Build current set from file
     file_rows: set[tuple[str, str | None]] = set()
     for _, row in df.iterrows():
         uni = str(row["university_name"]).strip()
@@ -55,10 +48,14 @@ async def sync_input_excel(
             if "extra_info" in df.columns and row["extra_info"]
             else None
         )
+        status = None
+        if "status" in df.columns:
+            raw = row.get("status")
+            if raw is not None and str(raw).strip().lower() not in ("", "none", "null", "nan"):
+                status = str(raw).strip()
         file_rows.add((uni, dept))
-        await db.upsert_input_university(uni, dept, extra or None)
+        await db.upsert_input_university(uni, dept, extra or None, status=status)
 
-    # Remove DB rows that no longer exist in file
     db_rows = await db.get_input_universities()
     deleted = 0
     for r in db_rows:
