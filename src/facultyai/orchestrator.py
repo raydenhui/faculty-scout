@@ -109,6 +109,24 @@ async def run_pipeline(
                         scrape_jobs += 1
 
                 await db.update_job_status(job["job_id"], "completed")
+
+                # Mark the uni-only row as completed (won't re-discover next time)
+                _set_excel_status(
+                    config.files.input_excel,
+                    job["university"],
+                    None,
+                    "completed",
+                )
+
+                # Append discovered departments as new rows in the Excel
+                _append_departments_to_excel(
+                    config.files.input_excel,
+                    job["university"],
+                    departments,
+                )
+
+                # Sync the new rows into DB so they're available for future runs
+                await sync_input_excel(db, config.files.input_excel)
             except Exception as e:
                 console.print(f"[red]Discovery failed[/] {job['university']}: {e}")
                 await db.update_job_status(job["job_id"], "failed", str(e))
@@ -302,5 +320,35 @@ def _set_excel_status(
             df.at[idx, "status"] = status
 
     # Restore original column name casing for output
+    df.columns = [c.replace("_", " ").title() for c in df.columns]
+    df.to_excel(path, index=False)
+
+
+def _append_departments_to_excel(
+    excel_path: str,
+    university: str,
+    departments: list[str],
+) -> None:
+    """Add discovered departments as new rows in the Excel input file."""
+    from pathlib import Path
+
+    import pandas as pd
+
+    path = Path(excel_path)
+    if not path.exists():
+        return
+
+    df = pd.read_excel(path, sheet_name=0)
+    df = df.where(pd.notna(df), None)
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+
+    for d in departments:
+        new_row = pd.DataFrame([{
+            "university_name": university,
+            "department_name": d,
+            "status": None,
+        }])
+        df = pd.concat([df, new_row], ignore_index=True)
+
     df.columns = [c.replace("_", " ").title() for c in df.columns]
     df.to_excel(path, index=False)
