@@ -159,16 +159,22 @@ async def run_pipeline(
                                 "university": job["university"],
                                 "department": job.get("department"),
                                 "need_discovery": False,
-                                "_progress_callback": (
-                                    lambda pct, msg, _t=task, _p=progress: (
-                                        _p.update(_t, completed=pct, description=f"[blue]{msg}")
-                                    )
-                                ),
                             }
+
+                            # Set progress callback via module-level variable (not serializable)
+                            from . import scraper_graph
+                            scraper_graph._progress_callback = (
+                                lambda pct, msg, _t=task, _p=progress: (
+                                    _p.update(_t, completed=pct, description=f"[blue]{msg}")
+                                )
+                            )
+
                             result = await agent.ainvoke(
                                 state,
                                 {"configurable": {"thread_id": jid}},
                             )
+
+                            scraper_graph._progress_callback = None
 
                             listing_url = result.get("listing_url")
                             if listing_url:

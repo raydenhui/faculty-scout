@@ -31,6 +31,9 @@ from .scraper import scrape
 log = get_logger("graph")
 _llm_log = get_llm_logger()
 
+# Module-level progress callback (not serialized, set per-invoke)
+_progress_callback: Any = None
+
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
@@ -404,9 +407,7 @@ def _run_scrapegraph_node(
     cache: CacheManager,
 ):
     async def _node(state: AgentState) -> AgentState:
-        # Pass progress_callback from state if available
-        cb = state.get("_progress_callback")
-        return await _run_scraper_impl(state, config, schema, llm, cache, progress_callback=cb)
+        return await _run_scraper_impl(state, config, schema, llm, cache, progress_callback=_progress_callback)
 
     return _node
 
