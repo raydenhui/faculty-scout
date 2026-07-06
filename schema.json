@@ -1,21 +1,15 @@
 {
   "columns": [
     {
-      "name": "Title",
-      "type": "extracted",
-      "hint": "The professor's title, e.g. Dr., Prof., etc.",
-      "validation": { "max_length": 30 }
-    },
-    {
       "name": "English Full Name",
       "type": "extracted",
       "hint": "The professor's full name in English, e.g. John Smith"
     },
     {
-      "name": "Last Name",
-      "type": "formula",
-      "formula": "=TEXTAFTER([@[English Full Name]],\" \")",
-      "comment": "Extract last name"
+      "name": "Position",
+      "type": "extracted",
+      "hint": "The professor's position or rank, e.g. Associate Professor",
+      "validation": { "max_length": 200 }
     },
     {
       "name": "Email",
@@ -37,7 +31,7 @@
     {
       "name": "Remark",
       "type": "extracted",
-      "hint": "Tracking notes for fields that could not be found"
+      "hint": "Any additional information about the scraping process. If not available, leave blank."
     }
   ],
   "dedup_keys": ["Institution", "Department"]
