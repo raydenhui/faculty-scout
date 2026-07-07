@@ -230,9 +230,9 @@ def status(config_path: str) -> None:
                         str(h["id"]),
                         started,
                         finished,
-                        str(h["total_jobs"] or "-"),
-                        str(h["successful"] or "-"),
-                        str(h["failed"] or "-"),
+                        str(h["total_jobs"]) if h["total_jobs"] is not None else "-",
+                        str(h["successful"]) if h["successful"] is not None else "-",
+                        str(h["failed"]) if h["failed"] is not None else "-",
                     )
                 console.print(htable)
 

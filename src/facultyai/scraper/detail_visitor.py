@@ -127,6 +127,11 @@ async def _llm_extract_detail(
         for c in schema.extracted_columns()
         if c.name in missing_fields
     )
+    example_keys = ", ".join(
+        f'"{c.name}": "value or null"'
+        for c in schema.extracted_columns()
+        if c.name in missing_fields
+    )
 
     prompt = f"""Extract these fields from a faculty profile page:
 
@@ -146,10 +151,10 @@ If the page is NOT a faculty profile (e.g., an error page, Cloudflare challenge,
 or any page that does not contain individual faculty information), set "error" to a description.
 Otherwise, omit the "error" field.
 
+Use the EXACT field names shown above as JSON keys.
 Return ONLY a JSON object:
 {{
-  "field_1": "value or null",
-  "field_2": "value or null",
+  {example_keys},
   "error": null
 }}
 

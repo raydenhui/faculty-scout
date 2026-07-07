@@ -18,6 +18,7 @@ class ColumnValidation(BaseModel):
     min_length: int | None = None
     contains_cjk: bool | None = None
     url_like: bool | None = None
+    case_insensitive: bool = False
 
 
 class ColumnDef(BaseModel):
