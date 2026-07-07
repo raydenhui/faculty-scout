@@ -2,7 +2,7 @@
 
 Graph:
     START ─► (dept missing? → discover_departments) ─► discover_url
-             ─► fetch_page ─► run_scrapegraph ─► validate_and_finalize ─► END
+             ─► fetch_page ─► run_scraper ─► validate_and_finalize ─► END
 
 Each node is wrapped with tenacity retry logic.  Results are cached via
 CacheManager and state is persisted for resume via LangGraph checkpointing.
@@ -11,8 +11,6 @@ Playwright is used as a fallback when a page requires JavaScript rendering.
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import json
 import re
 from typing import Any, TypedDict
@@ -25,12 +23,16 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from .cache import CacheManager
 from .config import AppConfig
 from .llm_factory import web_search
-from .logging_config import get_logger
-from .schema import Schema, build_extraction_prompt
+from .logging_config import get_llm_logger, get_logger
+from .schema import Schema
+from .scraper import scrape
+from .scraper.html_cleaner import clean_html
 
 log = get_logger("graph")
+_llm_log = get_llm_logger()
 
-_depth_sem = asyncio.Semaphore(1)  # DepthSearchGraph is resource-heavy (Playwright + qdrant + embeddings)
+# Module-level progress callback (not serialized, set per-invoke)
+_progress_callback: Any = None
 
 # ---------------------------------------------------------------------------
 # State
@@ -41,6 +43,7 @@ class AgentState(TypedDict, total=False):
     university: str
     department: str | None
     listing_url: str | None
+    page_url: str
     page_html: str | None
     extracted_records: list[dict[str, Any]]
     error: str | None
@@ -67,7 +70,7 @@ def build_agent_graph(
     graph.add_node("discover_departments", _discover_departments_node(config, llm, cache))
     graph.add_node("discover_url", _discover_url_node(config, llm, cache))
     graph.add_node("fetch_page", _fetch_page_node(config, cache))
-    graph.add_node("run_scrapegraph", _run_scrapegraph_node(config, schema, llm, cache))
+    graph.add_node("run_scraper", _run_scraper_node(config, schema, llm, cache))
     graph.add_node("validate_and_finalize", _validate_and_finalize_node(config, schema))
 
     graph.set_conditional_entry_point(
@@ -79,8 +82,8 @@ def build_agent_graph(
     )
     graph.add_edge("discover_departments", END)
     graph.add_edge("discover_url", "fetch_page")
-    graph.add_edge("fetch_page", "run_scrapegraph")
-    graph.add_edge("run_scrapegraph", "validate_and_finalize")
+    graph.add_edge("fetch_page", "run_scraper")
+    graph.add_edge("run_scraper", "validate_and_finalize")
     graph.add_edge("validate_and_finalize", END)
 
     if checkpointer is not None:
@@ -127,48 +130,141 @@ async def _discover_departments_impl(
     state: AgentState,
     config: AppConfig,
     llm: BaseChatModel,
-    cache: CacheManager,
+    cache: CacheManager | None,
 ) -> AgentState:
     uni = state["university"]
+    all_depts: list[str] = []
     try:
-        query = f"{uni} departments"
+        page_url = state.get("page_url", "").strip()
+        page_html = ""
 
-        max_attempts = config.scraping.max_retries_per_step
-        search_results: list[dict[str, str]] = []
-        for attempt in range(max_attempts):
+        if page_url:
+            # Use provided link directly, skip search
+            log.info("discover_dept using provided link=%s", page_url)
+            html = await _http_fetch(page_url, config)
+            if not html:
+                html = await _playwright_fetch(page_url, config)
+            if html and len(html) > 1000:
+                page_html = html
+            else:
+                page_url = ""
+
+        if not page_url:
+            # Step 1: Search for a department listing page
+            query = f"{uni} academic departments list"
             search_results = await web_search(
                 query,
                 provider=config.search.provider,
                 api_key=config.search.bing_api_key,
                 max_results=5,
             )
-            if search_results:
+
+            # Step 2: Find and fetch a department listing page
+            for r in search_results:
+                url = r.get("href", "")
+                if not url or any(b in url for b in ("wikipedia", "linkedin", "facebook")):
+                    continue
+                html = await _http_fetch(url, config)
+                if not html:
+                    html = await _playwright_fetch(url, config)
+                if html and len(html) > 1000:
+                    page_url = url
+                    page_html = html
+                    break
+
+        # Step 3: LLM extracts departments from the page (with pagination)
+        current_url = page_url
+        current_html = page_html
+        page_num = 0
+        max_pages = 30
+        visited_pages: list[str] = []
+
+        while current_url and page_num < max_pages:
+            page_num += 1
+            html_len = len(current_html) if current_html else 0
+            log.info("discover_dept page %d url=%s len=%d", page_num, current_url, html_len)
+
+            # Build context of previously visited pages
+            prev_pages = ""
+            if visited_pages:
+                prev_pages = "Previously visited pages:\n" + "\n".join(
+                    f"  {i}. {u}" for i, u in enumerate(visited_pages, 1)
+                ) + "\n"
+
+            prompt = f"""From this university page, extract only ACADEMIC departments and schools.
+
+University: {uni}
+Current page URL: {current_url}
+{prev_pages}
+Rules:
+- Include ONLY academic teaching/research departments (e.g., Computer Science, Physics).
+- Exclude administrative offices (HR, Finance, IT, Library, Registrar).
+- Exclude research centres/labs unless they are full academic departments.
+- Exclude graduate schools, continuing education, professional studies.
+
+IMPORTANT — Pagination detection:
+The page likely uses alphabetical (A, B, C...) or numbered pagination.
+- Look at the PREVIOUSLY VISITED PAGES to detect the pattern.
+- If previous pages are: .../A.html, .../B.html, .../C.html,
+  the next page is .../D.html (next letter in alphabet).
+- If previous pages are: .../page/1, .../page/2,
+  the next page is .../page/3.
+- Look for ALL navigation links on the page (letters A-Z, numbers, "Next").
+- If the next page link exists in the HTML, use it.
+- If the link is NOT visible but can be INFERRED from the pattern,
+  construct it and set as "next_page_url".
+- If the current letter/number is the LAST one on this page,
+  set "next_page_url" to "".
+
+Return ONLY a JSON object:
+{{
+  "departments": ["Computer Science", "Physics", "Mathematics"],
+  "next_page_url": "https://..." or ""
+}}
+
+HTML:
+{clean_html(current_html) if current_html else "No page available."}"""
+
+            response = await llm.ainvoke(prompt)
+            text = _llm_response_text(response)
+            _llm_log.info("===== dept_discovery[%d] PROMPT =====\n%s\n===== END PROMPT =====", page_num, prompt)
+            _llm_log.info("===== dept_discovery[%d] RESPONSE =====\n%s\n===== END RESPONSE =====", page_num, text)
+            log.debug("dept discovery page %d response:\n%s", page_num, text[:500])
+
+            m = re.search(r"\{[\s\S]*\}", text.strip())
+            if m:
+                try:
+                    data = json.loads(m.group())
+                    depts = data.get("departments", [])
+                    if isinstance(depts, list):
+                        all_depts.extend(depts)
+                    next_url = data.get("next_page_url", "").strip()
+                except json.JSONDecodeError:
+                    break
+            else:
                 break
-            await asyncio.sleep(config.scraping.request_delay_sec * (attempt + 1))
 
-        urls_text = "\n".join(r["href"] for r in search_results if r.get("href"))
+            # Record current page as visited before moving to next
+            visited_pages.append(current_url)
+            current_url = next_url
 
-        prompt = f"""Given the university "{uni}", find all academic departments/schools.
-From these search result URLs, suggest the most likely departments. If you cannot determine exact departments,
-return a list of common department names for this type of institution.
+            if current_url and current_url != page_url:
+                current_html = await _http_fetch(current_url, config)
+                if not current_html:
+                    current_html = await _playwright_fetch(current_url, config)
+                if not current_html:
+                    break
+            else:
+                break
 
-Search results:
-{urls_text or "No URLs available. Please use your knowledge of this university."}
+        # LLM deduplication: remove semantic duplicates
+        unique_deduped = await _llm_dedup_departments(all_depts, uni, llm)
 
-Return ONLY a JSON list of department name strings, like: ["Computer Science", "Physics", "Mathematics"]"""
+        state["discovered_departments"] = unique_deduped
+        log.info("dept discovery done: %d departments from %d pages", len(unique_deduped), page_num)
 
-        response = await llm.ainvoke(prompt)
-        text = _llm_response_text(response)
-
-        json_match = re.search(r"\[.*?\]", text, re.DOTALL)
-        if json_match:
-            depts = json.loads(json_match.group())
-            if isinstance(depts, list):
-                state["discovered_departments"] = depts
-                return state
-
-        state["discovered_departments"] = []
     except Exception as e:
+        log.warning("department discovery failed: %s", e)
         state["discovered_departments"] = []
         state["error"] = str(e)
 
@@ -192,21 +288,25 @@ async def _discover_url_impl(
     llm: BaseChatModel,
     cache: CacheManager,
 ) -> AgentState:
+    # If listing_url already provided, validate it, else fall through to discovery
+    provided = state.get("listing_url")
+    if provided and str(provided).startswith("http"):
+        log.info("discover_url using provided listing_url=%s", provided)
+        return state
+
     uni = state["university"]
     dept = state["department"] or ""
 
     queries = [
-        f"{uni} {dept} staff directory",
-        f"{uni} {dept} people",
-        f"{uni} department of {dept} faculty",
+        f"{uni} {dept} faculty",
         f"{uni} {dept} academic staff",
-        f"{uni} {dept} faculty listing",
+        f"{uni} department of {dept} faculty",
+        f"{uni} {dept} staff",
         f"{uni} {dept} professors",
     ] if dept else [
-        f"{uni} staff directory",
-        f"{uni} people",
         f"{uni} faculty",
         f"{uni} academic staff",
+        f"{uni} staff",
         f"{uni} professors",
     ]
 
@@ -291,9 +391,10 @@ async def _ask_llm_for_url(
     )
 
     try:
-        log.debug("discover_url[%s] prompt:\n%s", qi, prompt)
+        _llm_log.info("===== url_discovery[%s] PROMPT =====\n%s\n===== END PROMPT =====", qi, prompt)
         response = await llm.ainvoke(prompt)
         text = _llm_response_text(response).strip()
+        _llm_log.info("===== url_discovery[%s] RESPONSE =====\n%s\n===== END RESPONSE =====", qi, text)
         log.info("discover_url[%s] RESPONSE:\n%s", qi, text)
     except Exception as e:
         log.warning("discover_url[%s] LLM call failed: %s", qi, e)
@@ -340,7 +441,7 @@ def _fetch_page_node(
         html = await _http_fetch(url, config)
         if html and _has_content(html):
             log.debug("fetch_page http OK len=%d", len(html))
-            cache.set_url_content(url, html)
+            cache.set_url_content(url, html, ttl_sec=config.files.cache_ttl_url)
             state["page_html"] = html
             return state
 
@@ -348,7 +449,7 @@ def _fetch_page_node(
         html = await _playwright_fetch(url, config)
         if html:
             log.debug("fetch_page playwright OK len=%d", len(html))
-            cache.set_url_content(url, html)
+            cache.set_url_content(url, html, ttl_sec=config.files.cache_ttl_url)
             state["page_html"] = html
             return state
 
@@ -383,7 +484,7 @@ async def _playwright_fetch(url: str, config: AppConfig) -> str | None:
             page = await browser.new_page()
             try:
                 await page.goto(url, timeout=config.scraping.browser_timeout * 1000)
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_load_state("domcontentloaded")
                 html = await page.content()
                 return html
             finally:
@@ -399,146 +500,126 @@ def _has_content(html: str) -> bool:
     return len(text.strip()) > 200
 
 
-def _run_scrapegraph_node(
+def _run_scraper_node(
     config: AppConfig,
     schema: Schema,
     llm: BaseChatModel,
     cache: CacheManager,
 ):
     async def _node(state: AgentState) -> AgentState:
-        return await _run_scrapegraph_impl(state, config, schema, llm, cache)
+        return await _run_scraper_impl(state, config, schema, llm, cache, progress_callback=_progress_callback)
 
     return _node
 
 
-async def _run_scrapegraph_impl(
+async def _run_scraper_impl(
     state: AgentState,
     config: AppConfig,
     schema: Schema,
     llm: BaseChatModel,
     cache: CacheManager,
+    progress_callback: Any = None,
 ) -> AgentState:
     url = state.get("listing_url")
     if not url:
-        log.warning("run_scrapegraph: no listing_url, skipping")
+        log.warning("run_scraper: no listing_url, skipping")
         if not state.get("error"):
             state["error"] = "No listing URL available for scraping."
         return state
 
-    prompt_text = build_extraction_prompt(schema)
-
-    input_hash = _cache_input_hash(url, prompt_text)
-    cached_records = cache.get_extraction(input_hash)
-    if cached_records is not None:
-        log.info("run_scrapegraph cache HIT url=%s records=%d", url, len(cached_records))
-        state["extracted_records"] = cached_records
+    html = state.get("page_html")
+    if not html:
+        log.warning("run_scraper: no page_html, skipping")
+        if not state.get("error"):
+            state["error"] = "No page HTML available for scraping."
         return state
 
-    source = state.get("page_html") or url
-    log.info("run_scrapegraph start url=%s source_type=%s", url, "html" if state.get("page_html") else "url")
+    log.info("run_scraper start url=%s html_len=%d", url, len(html))
 
     try:
-        llm_config: dict[str, Any] = {
-            "model": f"{config.llm.provider}/{config.llm.model}",
-            "temperature": config.llm.temperature,
-        }
-        if config.llm.api_key:
-            llm_config["api_key"] = config.llm.api_key
-        if config.llm.base_url:
-            llm_config["base_url"] = config.llm.base_url
+        records = await scrape(url, html, schema, llm, config, progress_callback=progress_callback)
 
-        if config.scraping.deep_extraction:
-            records = await _scrape_depth(url, prompt_text, llm_config, config)
-        else:
-            records = await _scrape_single_page(source, prompt_text, llm_config)
+        # Check for page-level error detected by LLM
+        if records and len(records) == 1 and isinstance(records[0], dict):
+            page_err = records[0].get("_page_error")
+            if page_err:
+                state["error"] = f"Listing page issue: {page_err}"
+                state["extracted_records"] = []
+                return state
 
-        log.info("run_scrapegraph done  records=%d", len(records))
+        log.info("run_scraper done  records=%d", len(records))
         if records:
             log.debug("sample keys: %s", list(records[0].keys()) if records else "[]")
-            cache.set_extraction(input_hash, records)
 
         state["extracted_records"] = records
 
     except Exception as e:
-        log.error("run_scrapegraph FAILED  %s: %s", type(e).__name__, e)
-        state["error"] = f"ScrapeGraphAI error: {e}"
+        log.error("run_scraper FAILED  %s: %s", type(e).__name__, e)
+        state["error"] = f"Scraper error: {e}"
         state["extracted_records"] = []
 
     return state
 
 
-async def _scrape_depth(
-    url: str,
-    prompt_text: str,
-    llm_config: dict[str, Any],
-    config: AppConfig,
-) -> list[dict[str, Any]]:
-    """Use DepthSearchGraph (depth=1) for pure AI extraction from listing + detail pages."""
-    from scrapegraphai.graphs import DepthSearchGraph
-
-    log.info("depth_search start url=%s depth=1", url)
-
-    crawl_config = {
-        "llm": llm_config,
-        "depth": 1,
-        "only_inside_links": True,
-        "cut": True,
-        "verbose": False,
-    }
-
-    graph = DepthSearchGraph(
-        prompt=prompt_text,
-        source=url,
-        config=crawl_config,
-    )
-    loop = asyncio.get_event_loop()
-
-    def _run() -> dict:
-        return graph.run()
-
-    result = await loop.run_in_executor(None, _run)
-    records = _extract_records_result(result)
-    log.info("depth_search done records=%d", len(records))
-    return records
-
-
-async def _scrape_single_page(
-    source: str,
-    prompt_text: str,
-    llm_config: dict[str, Any],
-) -> list[dict[str, Any]]:
-    from scrapegraphai.graphs import SmartScraperGraph
-
-    scraper = SmartScraperGraph(
-        prompt=prompt_text,
-        source=source,
-        config={"llm": llm_config},
-    )
-    loop = asyncio.get_event_loop()
-
-    def _run() -> dict:
-        return scraper.run()
-
-    result = await loop.run_in_executor(None, _run)
-    return _extract_records_result(result)
-
-
-def _extract_records_result(result: Any) -> list[dict[str, Any]]:
-    if isinstance(result, dict):
-        extracted = result.get("content", result.get("output", result.get("data", result)))
-        if isinstance(extracted, list):
-            return extracted
-        if isinstance(extracted, dict):
-            return [extracted]
+async def _llm_dedup_departments(
+    departments: list[str],
+    university: str,
+    llm: BaseChatModel,
+) -> list[str]:
+    """Use LLM to remove semantically duplicate department names."""
+    if not departments:
         return []
-    if isinstance(result, list):
-        return result
-    return []
 
+    # First pass: simple string dedup
+    seen: set[str] = set()
+    unique: list[str] = []
+    for d in departments:
+        key = d.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(d.strip())
 
-def _cache_input_hash(url: str, prompt: str) -> str:
-    payload = json.dumps({"url": url, "prompt": prompt}, sort_keys=True)
-    return hashlib.sha256(payload.encode()).hexdigest()[:40]
+    if len(unique) <= 1:
+        return unique
+
+    dept_list = "\n".join(f"  - {d}" for d in unique)
+
+    prompt = f"""Review this list of academic departments at {university} and remove duplicates.
+
+The list may contain the same department expressed in different formats:
+- "Computer Science, Department of" and "Department of Computer Science" → same
+- "Computing, School of" and "School of Computing" → same
+- "Physics" and "Department of Physics" → same (keep the shorter version)
+- "Mathematics" and "Applied Mathematics" → DIFFERENT (keep both)
+- "Biology" and "Biological Sciences" → same (keep the shorter version)
+- "Electrical and Computer Engineering" and "Computer Engineering" → DIFFERENT (keep both)
+
+Department list:
+{dept_list}
+
+Return ONLY a JSON array of the deduplicated department names:
+["Computer Science", "Physics", "Mathematics"]"""
+
+    try:
+        response = await llm.ainvoke(prompt)
+        text = _llm_response_text(response)
+        _llm_log.info("===== dept_dedup PROMPT =====\n%s\n===== END PROMPT =====", prompt)
+        _llm_log.info("===== dept_dedup RESPONSE =====\n%s\n===== END RESPONSE =====", text)
+    except Exception as e:
+        log.warning("dept dedup LLM failed: %s", e)
+        return unique
+
+    m = re.search(r"\[.*?\]", text, re.DOTALL)
+    if m:
+        try:
+            deduped = json.loads(m.group())
+            if isinstance(deduped, list):
+                log.info("dept dedup: %d → %d departments", len(unique), len(deduped))
+                return deduped
+        except json.JSONDecodeError:
+            pass
+
+    return unique
 
 
 def _validate_and_finalize_node(
@@ -548,24 +629,50 @@ def _validate_and_finalize_node(
     async def _node(state: AgentState) -> AgentState:
         records = state.get("extracted_records", [])
 
-        validated: list[dict[str, Any]] = []
-        for rec in records:
-            if not isinstance(rec, dict):
-                continue
-            clean: dict[str, Any] = {}
-            for col in schema.extracted_columns():
-                val = rec.get(col.name, "")
-                if val is None:
-                    val = ""
-                if col.name.lower() == "email" and val and not _is_valid_email(str(val)):
-                    val = ""
-                clean[col.name] = val
-            validated.append(clean)
+        validated = _apply_schema_validation(records, schema, llm=None)
 
         state["extracted_records"] = validated
         return state
 
     return _node
+
+
+def _apply_schema_validation(
+    records: list[dict[str, Any]],
+    schema: Schema,
+    llm: BaseChatModel | None = None,
+) -> list[dict[str, Any]]:
+    """Apply per-column validation rules from schema.json."""
+    validated: list[dict[str, Any]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        clean: dict[str, Any] = {}
+        for col in schema.columns:
+            val = rec.get(col.name, "")
+            if val is None:
+                val = ""
+            v = getattr(col, "validation", None)
+            if v is not None:
+                val = _validate_column(str(val), v, llm)
+            clean[col.name] = val
+        validated.append(clean)
+    return validated
+
+
+def _validate_column(val: str, v: Any, llm: BaseChatModel | None = None) -> str:
+    """Apply validation rules. If llm is provided, ask LLM about violations."""
+    import re
+
+    if v.regex and val and not re.match(v.regex, val, re.IGNORECASE if v.regex.startswith("^") else 0):
+        return ""
+    if v.max_length is not None and len(val) > v.max_length:
+        return ""
+    if v.contains_cjk and val and not re.search(r"[\u4e00-\u9fff\u3400-\u4dbf]", val):
+        return ""
+    if v.url_like and val and not re.match(r"^https?://", val, re.IGNORECASE):
+        return ""
+    return val
 
 
 # ---------------------------------------------------------------------------
@@ -579,10 +686,3 @@ def _llm_response_text(response: Any) -> str:
     if isinstance(response, str):
         return response
     return str(response)
-
-
-_EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
-
-
-def _is_valid_email(email: str) -> bool:
-    return bool(_EMAIL_RE.match(email))

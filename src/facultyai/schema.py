@@ -3,8 +3,6 @@
 Parses ``schema.json`` and resolves column types (extracted, formula, static).
 """
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import Any, Literal
@@ -12,6 +10,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 ColumnType = Literal["extracted", "formula", "static"]
+
+
+class ColumnValidation(BaseModel):
+    regex: str | None = None
+    max_length: int | None = None
+    min_length: int | None = None
+    contains_cjk: bool | None = None
+    url_like: bool | None = None
 
 
 class ColumnDef(BaseModel):
@@ -22,6 +28,7 @@ class ColumnDef(BaseModel):
     comment: str | None = None
     value: Any | None = None
     value_from: str | None = None
+    validation: ColumnValidation | None = None
 
     def is_extracted(self) -> bool:
         return self.type == "extracted"
@@ -35,6 +42,7 @@ class ColumnDef(BaseModel):
 
 class Schema(BaseModel):
     columns: list[ColumnDef] = Field(default_factory=list)
+    dedup_keys: list[str] = Field(default_factory=list)
 
     def extracted_columns(self) -> list[ColumnDef]:
         return [c for c in self.columns if c.is_extracted()]
@@ -66,33 +74,3 @@ def load_schema(path: str | Path = "schema.json") -> Schema:
         return Schema()
     data = json.loads(path.read_text(encoding="utf-8"))
     return Schema.model_validate(data)
-
-
-def build_extraction_prompt(schema: Schema) -> str:
-    """Build the ScrapeGraphAI prompt from extracted columns and hints.
-
-    Designed for DepthSearchGraph (depth=1): the LLM visits the listing page
-    AND individual profile pages, so it can extract listing-level fields
-    (name, title, position) AND detail-level fields (email, profile URL).
-    """
-    lines = []
-    for c in schema.extracted_columns():
-        hint_text = f"  — {c.hint}" if c.hint else ""
-        lines.append(f'  "{c.name}"{hint_text}')
-    fields = "\n".join(lines)
-    names = ", ".join(f'"{c.name}"' for c in schema.extracted_columns())
-    return (
-        "You are crawling a university faculty directory. You will visit the main "
-        "listing page AND follow links to individual professor profile pages. "
-        "Extract the following fields for every faculty member from ALL pages "
-        "you visit:\n\n"
-        f"{fields}\n\n"
-        "Important:\n"
-        "- Basic info (name, title, position) is usually on the listing page.\n"
-        "- Email, profile URL, and detailed bio are usually on the individual "
-        "profile page — look for lines like 'Email: xxx@xxx.edu'.\n"
-        "- Fill in every field you can find. Leave missing fields as empty strings.\n\n"
-        "Return ONLY a JSON array of objects. Each object MUST use exactly these keys: "
-        f"[{names}].\n"
-        "Example: [{" + f'"{schema.extracted_columns()[0].name}": "Dr. John Smith"' + "}]"
-    )

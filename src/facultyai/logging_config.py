@@ -28,14 +28,40 @@ def configure(verbose: bool = False, debug: bool = False) -> None:
     level = logging.DEBUG if debug else (logging.INFO if verbose else logging.WARNING)
     fmt = LOG_FORMAT_VERBOSE if debug else LOG_FORMAT
 
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter(fmt, datefmt="%H:%M:%S"))
-
     root = logging.getLogger("facultyai")
     root.setLevel(level)
     root.handlers.clear()
-    root.addHandler(handler)
     root.propagate = False
+
+    # Console handler (stderr)
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter(fmt, datefmt="%H:%M:%S"))
+    handler.setLevel(level)
+    root.addHandler(handler)
+
+    # File handler for debug logs (debug.log)
+    if debug:
+        from pathlib import Path
+        fh = logging.FileHandler(Path("debug.log"), mode="w", encoding="utf-8")
+        fh.setFormatter(logging.Formatter(LOG_FORMAT_VERBOSE, datefmt="%Y-%m-%d %H:%M:%S"))
+        fh.setLevel(logging.DEBUG)
+        root.addHandler(fh)
+
+    # Separate file for full LLM conversations (always when debug)
+    if debug:
+        from pathlib import Path
+        llm_log = logging.getLogger("facultyai.llm_conversation")
+        llm_log.handlers.clear()
+        llm_log.propagate = False
+        llm_log.setLevel(logging.DEBUG)
+        fh2 = logging.FileHandler(Path("llm_conversation.log"), mode="w", encoding="utf-8")
+        fh2.setFormatter(logging.Formatter("%(message)s"))
+        llm_log.addHandler(fh2)
+
+
+def get_llm_logger() -> logging.Logger:
+    """Return a logger for LLM conversation content (prompts + responses)."""
+    return logging.getLogger("facultyai.llm_conversation")
 
 
 def get_logger(name: str) -> logging.Logger:

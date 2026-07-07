@@ -46,8 +46,6 @@ class ScrapingConfig(BaseModel):
     max_concurrent_jobs: int = 3
     max_retries_per_step: int = 3
     request_delay_sec: float = 1.0
-    use_scrapegraphai: bool = True
-    deep_extraction: bool = False
     max_detail_pages: int = 10
 
 
@@ -57,6 +55,7 @@ class FilesConfig(BaseModel):
     schema_file: str = "schema.json"
     database: str = "facultyai.db"
     cache_dir: str = "./cache"
+    cache_ttl_url: int = 604800
 
 
 class OutputConfig(BaseModel):

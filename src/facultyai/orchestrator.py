@@ -47,10 +47,6 @@ async def run_pipeline(
         console.print("[yellow]No university entries to process.[/]")
         return {"total": 0, "successful": 0, "failed": 0}
 
-    existing_jobs = await db.list_jobs()
-    existing_job_ids = {j["job_id"] for j in existing_jobs}
-    existing_job_map = {j["job_id"]: j for j in existing_jobs}
-
     discovery_jobs = 0
     scrape_jobs = 0
 
@@ -60,29 +56,31 @@ async def run_pipeline(
         for r in uni_rows:
             uni = r["university"]
             dept = r.get("department")
+            # Normalize empty-like values to None for discovery triggering
+            if dept is not None and str(dept).strip().lower() in ("", "none", "null", "nan"):
+                dept = None
 
-            jid = _job_id(uni, dept)
-
-            if jid in existing_job_ids:
-                existing = existing_job_map[jid]
-                if retry_failed and existing["status"] in ("failed", "running", "completed"):
-                    await db.update_job_status(jid, "pending")
-                    if existing["job_type"] == "discovery":
-                        discovery_jobs += 1
-                    else:
-                        scrape_jobs += 1
-                elif existing["status"] in ("completed", "running"):
-                    if existing["job_type"] == "discovery":
-                        discovery_jobs += 1
-                    else:
-                        scrape_jobs += 1
+            # Skip rows already marked complete in Excel
+            excel_status = r.get("status")
+            log.debug("status check uni=%s dept=%s raw_status=%s", uni, dept, repr(excel_status))
+            if excel_status and str(excel_status).strip().lower() not in ("", "none", "null", "nan"):
+                console.print(
+                    f"  [dim]Skipping[/] {uni}/{dept or 'All'}: "
+                    "already completed (clear status to re-run)"
+                )
                 continue
 
             if dept is None and config.department.discovery_enabled:
                 await db.upsert_job(uni, None, job_type="discovery", status="pending")
                 discovery_jobs += 1
             else:
-                await db.upsert_job(uni, dept, job_type="scrape", status="pending")
+                link = r.get("link")
+                raw_link = str(link).strip() if link else ""
+                if raw_link.lower() in ("", "none", "null", "nan"):
+                    raw_link = ""
+                url = raw_link if raw_link.startswith("http") else None
+                await db.upsert_job(uni, dept, job_type="scrape", status="pending",
+                                    listing_url=url)
                 scrape_jobs += 1
 
         console.print(f"  Queued {discovery_jobs} discovery jobs, {scrape_jobs} scrape jobs.")
@@ -121,6 +119,25 @@ async def run_pipeline(
                         scrape_jobs += 1
 
                 await db.update_job_status(job["job_id"], "completed")
+
+                # Mark the uni-only row as completed (won't re-discover next time)
+                _set_excel_status(
+                    config.files.input_excel,
+                    job["university"],
+                    None,
+                    "completed",
+                    link=result.get("page_url", ""),
+                )
+
+                # Append discovered departments as new rows in the Excel
+                _append_departments_to_excel(
+                    config.files.input_excel,
+                    job["university"],
+                    departments,
+                )
+
+                # Sync the new rows into DB so they're available for future runs
+                await sync_input_excel(db, config.files.input_excel)
             except Exception as e:
                 console.print(f"[red]Discovery failed[/] {job['university']}: {e}")
                 await db.update_job_status(job["job_id"], "failed", str(e))
@@ -153,11 +170,23 @@ async def run_pipeline(
                                 "university": job["university"],
                                 "department": job.get("department"),
                                 "need_discovery": False,
+                                "listing_url": job.get("listing_url"),
                             }
+
+                            # Set progress callback via module-level variable (not serializable)
+                            from . import scraper_graph
+                            scraper_graph._progress_callback = (
+                                lambda pct, msg, _t=task, _p=progress: (
+                                    _p.update(_t, completed=pct, description=f"[blue]{msg}")
+                                )
+                            )
+
                             result = await agent.ainvoke(
                                 state,
                                 {"configurable": {"thread_id": jid}},
                             )
+
+                            scraper_graph._progress_callback = None
 
                             listing_url = result.get("listing_url")
                             if listing_url:
@@ -169,6 +198,8 @@ async def run_pipeline(
                                 )
 
                             records = result.get("extracted_records", [])
+                            for rec in records:
+                                _fill_static_fields(rec, job, schema)
                             graph_error = result.get("error")
                             log.info(
                                 "job done  uni=%s dept=%s records=%d url=%s error=%s",
@@ -187,32 +218,30 @@ async def run_pipeline(
                                 if not records:
                                     await db.update_job_status(jid, "failed", graph_error)
                                     failed += 1
+                                    _set_excel_status(
+                                        config.files.input_excel,
+                                        job["university"],
+                                        job.get("department"),
+                                        f"failed: {graph_error}",
+                                        link=result.get("listing_url") or "",
+                                    )
                                     progress.update(task, advance=1)
                                     return
 
-                            for rec in records:
-                                unique_vals: dict[str, Any] = {}
-                                for key in config.output.unique_keys:
-                                    val = rec.get(key, "")
-                                    if val:
-                                        unique_vals[key] = val
-                                await db.upsert_faculty(
-                                    university=job["university"],
-                                    department=job.get("department"),
-                                    unique_vals=unique_vals,
-                                    data=rec,
-                                    profile_url=rec.get(
-                                        "Profile URL", result.get("listing_url")
-                                    ),
-                                )
-
-                            seen_ids = []
+                            seen_ids: list[str] = []
                             for rec in records:
                                 uv: dict[str, Any] = {}
                                 for key in config.output.unique_keys:
-                                    val = rec.get(key, "")
+                                    val = rec.get(key)
                                     if val:
                                         uv[key] = val
+                                await db.upsert_faculty(
+                                    job["university"],
+                                    job.get("department"),
+                                    uv,
+                                    rec,
+                                    profile_url=rec.get("profile_url") or None,
+                                )
                                 rid = _build_record_id(
                                     job["university"], job.get("department"), uv
                                 )
@@ -228,6 +257,24 @@ async def run_pipeline(
                                 f"[green]Scrape[/] {job['university']}/"
                                 f"{job.get('department', 'All')}: {len(records)} faculty"
                             )
+
+                            export_count = await export_to_excel(
+                                db, schema, config.files.output_excel,
+                                upsert_university=job["university"],
+                                upsert_department=job.get("department"),
+                            )
+                            log.info("incremental export: %d rows written for %s/%s",
+                                     export_count, job["university"], job.get("department"))
+
+                            # Write completed status to Excel
+                            # Write completed status + link to Excel
+                            _set_excel_status(
+                                config.files.input_excel,
+                                job["university"],
+                                job.get("department"),
+                                "completed",
+                                link=result.get("listing_url") or "",
+                            )
                         except Exception as e:
                             console.print(
                                 f"[red]Scrape failed[/] {job['university']}/"
@@ -235,6 +282,13 @@ async def run_pipeline(
                             )
                             await db.update_job_status(jid, "failed", str(e))
                             failed += 1
+                            _set_excel_status(
+                                config.files.input_excel,
+                                job["university"],
+                                job.get("department"),
+                                f"failed: {str(e)[:100]}",
+                                link=result.get("listing_url", "") if "result" in dir() else "",
+                            )
                         finally:
                             progress.update(task, advance=1)
 
@@ -248,11 +302,7 @@ async def run_pipeline(
         total = discovery_jobs + scrape_jobs
         await db.finish_run(run_id, total, successful, failed)
 
-    console.print("[bold blue]Export[/] Generating Excel output...")
-    row_count = await export_to_excel(db, schema, config.files.output_excel)
-    console.print(f"  [green]{config.files.output_excel}[/] written ({row_count} rows).")
-
-    return {"total": total, "successful": successful, "failed": failed}
+        return {"total": total, "successful": successful, "failed": failed}
 
 
 def _build_record_id(university: str, department: str | None, unique_vals: dict[str, Any]) -> str:
@@ -261,3 +311,83 @@ def _build_record_id(university: str, department: str | None, unique_vals: dict[
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:32]
+
+
+def _fill_static_fields(rec: dict[str, Any], job: dict[str, Any], schema: Any) -> None:
+    meta = {
+        "university_name": job["university"],
+    }
+    for col in schema.static_columns():
+        if col.value_from and col.value_from in meta:
+            rec[col.name] = meta[col.value_from]
+
+
+def _set_excel_status(
+    excel_path: str,
+    university: str,
+    department: str | None,
+    status: str,
+    link: str | None = None,
+) -> None:
+    """Write status and link back to the input Excel file."""
+    from pathlib import Path
+
+    import pandas as pd
+
+    path = Path(excel_path)
+    if not path.exists():
+        return
+
+    df = pd.read_excel(path, sheet_name=0)
+    df = df.where(pd.notna(df), None)
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+
+    if "status" not in df.columns:
+        df["status"] = None
+    df["status"] = df["status"].astype(object)
+
+    if "link" not in df.columns:
+        df["link"] = None
+    df["link"] = df["link"].astype(object)
+
+    for idx, row in df.iterrows():
+        row_uni = str(row["university_name"]).strip()
+        row_dept = str(row.get("department_name", "")).strip() if row.get("department_name") else ""
+        if row_uni == university and (row_dept == (department or "") or (not row_dept and not department)):
+            df.at[idx, "status"] = status
+            if link:
+                df.at[idx, "link"] = link
+
+    # Restore original column name casing for output
+    df.columns = [c.replace("_", " ").title() for c in df.columns]
+    df.to_excel(path, index=False)
+
+
+def _append_departments_to_excel(
+    excel_path: str,
+    university: str,
+    departments: list[str],
+) -> None:
+    """Add discovered departments as new rows in the Excel input file."""
+    from pathlib import Path
+
+    import pandas as pd
+
+    path = Path(excel_path)
+    if not path.exists():
+        return
+
+    df = pd.read_excel(path, sheet_name=0)
+    df = df.where(pd.notna(df), None)
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+
+    for d in departments:
+        new_row = pd.DataFrame([{
+            "university_name": university,
+            "department_name": d,
+            "status": None,
+        }])
+        df = pd.concat([df, new_row], ignore_index=True)
+
+    df.columns = [c.replace("_", " ").title() for c in df.columns]
+    df.to_excel(path, index=False)

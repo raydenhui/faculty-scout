@@ -10,10 +10,7 @@ from facultyai.llm_factory import get_llm
 from facultyai.schema import ColumnDef, Schema
 from facultyai.scraper_graph import (
     AgentState,
-    _cache_input_hash,
-    _extract_records_result,
     _has_content,
-    _is_valid_email,
     _llm_response_text,
     _route_dept,
     build_agent_graph,
@@ -21,13 +18,6 @@ from facultyai.scraper_graph import (
 
 
 class TestHelpers:
-    def test_valid_email(self) -> None:
-        assert _is_valid_email("jsmith@mit.edu") is True
-        assert _is_valid_email("a.b@c.edu.sg") is True
-        assert _is_valid_email("not-an-email") is False
-        assert _is_valid_email("") is False
-        assert _is_valid_email("user@domain") is False
-
     def test_has_content(self) -> None:
         short = "<html><body>hi</body></html>"
         assert _has_content(short) is False
@@ -43,32 +33,6 @@ class TestHelpers:
             content = "fake content"
 
         assert _llm_response_text(FakeResponse()) == "fake content"
-
-    def test_extract_records_from_dict_output(self) -> None:
-        result = _extract_records_result({"output": [{"name": "A"}, {"name": "B"}]})
-        assert result == [{"name": "A"}, {"name": "B"}]
-
-    def test_extract_records_from_list(self) -> None:
-        result = _extract_records_result([{"name": "A"}, {"name": "B"}])
-        assert result == [{"name": "A"}, {"name": "B"}]
-
-    def test_extract_records_from_single_dict(self) -> None:
-        result = _extract_records_result({"output": {"name": "A"}})
-        assert result == [{"name": "A"}]
-
-    def test_extract_records_from_string(self) -> None:
-        result = _extract_records_result("not a list")
-        assert result == []
-
-    def test_cache_input_hash_stable(self) -> None:
-        h1 = _cache_input_hash("http://example.com", "extract name")
-        h2 = _cache_input_hash("http://example.com", "extract name")
-        assert h1 == h2
-
-    def test_cache_input_hash_changes(self) -> None:
-        h1 = _cache_input_hash("http://example.com", "extract name")
-        h2 = _cache_input_hash("http://example.com", "extract email")
-        assert h1 != h2
 
 
 class TestRouting:
