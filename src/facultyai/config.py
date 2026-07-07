@@ -46,10 +46,7 @@ class ScrapingConfig(BaseModel):
     max_concurrent_jobs: int = 3
     max_retries_per_step: int = 3
     request_delay_sec: float = 1.0
-    use_scrapegraphai: bool = True
-    deep_extraction: bool = False
     max_detail_pages: int = 10
-    item_extract_mode: str = "split"
 
 
 class FilesConfig(BaseModel):

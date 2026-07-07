@@ -1,7 +1,7 @@
 """Custom web scraper module for FacultyAI.
 
-Cell 2: LLM analyzes listing page (2a: item split + statics, 2b: extraction methods + follow link)
-Cell 3: Detail page extraction (LLM only, None for unfound, remark tracking)
+LLM directly extracts all faculty records from the listing page HTML.
+Detail pages are visited for any missing fields (null values).
 """
 
 from __future__ import annotations
@@ -13,11 +13,12 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from ..config import AppConfig
 from ..logging_config import get_logger
 from ..schema import Schema
-from .detail_visitor import visit_detail_pages
-from .field_extractor import extract_fields_from_listing
+from .detail_visitor import _fetch_one_url, visit_detail_pages
 from .pattern_analyzer import analyze_listing_page
 
 log = get_logger("scraper")
+
+MAX_PAGES = 30  # safety limit (can be overridden by config)
 
 
 async def scrape(
@@ -28,71 +29,79 @@ async def scrape(
     config: AppConfig,
     progress_callback: Any = None,
 ) -> list[dict[str, Any]]:
-    """Extract faculty records from a listing page."""
+    """Extract faculty records from all listing pages (with pagination).
+
+    1. LLM analyzes listing page → records + next_page_url
+    2. Follow next page links up to MAX_PAGES
+    3. Combine all records, visit profile pages for missing fields
+    """
     field_names = [c.name for c in schema.extracted_columns()]
-    mode = config.scraping.item_extract_mode
-    log.info("scrape start url=%s html_len=%d fields=%d mode=%s",
-             url, len(html), len(field_names), mode)
+    all_records: list[dict[str, Any]] = []
+    current_url = url
+    current_html = html
+    page_num = 0
+    visited_pages: list[str] = []
 
-    # 25%% — LLM is analyzing the listing page
-    _update_progress(progress_callback, 25, "LLM analyzing listing page...")
+    while current_url and page_num < MAX_PAGES:
+        page_num += 1
+        log.info("scrape page %d url=%s html_len=%d", page_num, current_url, len(current_html))
+        _update_progress(progress_callback, min(5 + page_num * 5, 30),
+                         f"Analyzing page {page_num}...")
 
-    analysis = await analyze_listing_page(llm, html, schema, url, mode=mode)
-    if analysis is None:
-        log.error("scrape listing analysis failed")
+        analysis = await analyze_listing_page(llm, current_html, schema, current_url,
+                                              visited_pages=visited_pages if page_num > 1 else None)
+        if analysis is None:
+            log.error("scrape listing analysis failed on page %d", page_num)
+            break
+
+        if analysis.page_error:
+            log.warning("scrape page error: %s", analysis.page_error)
+            return [{"_page_error": analysis.page_error}]
+
+        records = analysis_dict_to_records(analysis, field_names)
+        all_records.extend(records)
+        log.info("scrape page %d: %d records (total: %d)", page_num, len(records), len(all_records))
+
+        # Follow next page
+        visited_pages.append(current_url)
+        current_url = analysis.next_page_url.strip() if analysis.next_page_url else ""
+        if current_url:
+            _update_progress(progress_callback, 30, f"Fetching page {page_num + 1}...")
+            current_html = await _fetch_one_url(current_url, config)
+            if not current_html:
+                log.info("scrape next page fetch failed: %s", current_url)
+                break
+
+    if not all_records:
         return []
 
-    analysis_dict = analysis.to_dict()
-    log.info(
-        "scrape analysis: item_selector=%s follow_link=%s methods=%d statics=%d",
-        analysis.item_selector or "(regex)",
-        analysis.follow_link_selector or "(none)",
-        len(analysis.extraction_methods),
-        len(analysis.static_values),
-    )
+    # 50% — listing extraction done
+    has_detail = len(all_records) > 0
+    _update_progress(progress_callback, 50,
+                     f"Extracted {len(all_records)} entries, visiting profile pages...")
 
-    # Propagate page-level error to the state
-    if analysis.page_error:
-        log.warning("scrape page error: %s", analysis.page_error)
-        return [{"_page_error": analysis.page_error}]
-
-    # Direct mode: use LLM-extracted records directly, skip split/extract
-    if mode == "direct":
-        records = analysis_dict.get("_direct_records", [])
-        records = _normalize_fields(records, field_names)
-        log.info("scrape direct mode: %d records from LLM", len(records))
-    else:
-        for field_name, value in analysis.static_values.items():
-            if field_name in field_names:
-                analysis_dict.setdefault("extraction_methods", {})[field_name] = {
-                    "method": "static", "pattern": str(value),
-                }
-        records = await extract_fields_from_listing(html, analysis_dict, llm, field_names)
-        log.info("scrape listing extraction: %d records", len(records))
-
-    # 50%% — listing page extraction done
-    has_detail = analysis.has_detail_pages and records
+    # Detail page extraction for missing fields
     if has_detail:
-        _update_progress(progress_callback, 50,
-                         f"Extracted {len(records)} entries, visiting profile pages...")
-    else:
-        _update_progress(progress_callback, 100, f"Done — {len(records)} entries")
-
-    # Cell 3: Detail page extraction for missing fields
-    if has_detail:
-        records = await visit_detail_pages(
-            html, url, records, analysis_dict, field_names, schema, llm, config,
+        analysis_dict = {"has_detail_pages": True, "static_values": {}}
+        all_records = await visit_detail_pages(
+            html, url, all_records, analysis_dict, field_names, schema, llm, config,
             progress_callback=progress_callback,
         )
-        log.info("scrape after detail pages: %d records", len(records))
-        _update_progress(progress_callback, 100, f"Done — {len(records)} entries")
+        log.info("scrape after detail pages: %d records", len(all_records))
+        _update_progress(progress_callback, 100, f"Done — {len(all_records)} entries")
 
-    # Strip internal profile_url from records (no longer needed)
-    for rec in records:
+    for rec in all_records:
         rec.pop("profile_url", None)
 
-    log.info("scrape done url=%s records=%d", url, len(records))
-    return records
+    log.info("scrape done url=%s records=%d pages=%d", url, len(all_records), page_num)
+    return all_records
+
+
+def analysis_dict_to_records(analysis: Any, field_names: list[str]) -> list[dict[str, Any]]:
+    """Extract and normalize records from a ListingAnalysis."""
+    d = analysis.to_dict()
+    records = d.get("_direct_records", [])
+    return _normalize_fields(records, field_names)
 
 
 def _update_progress(callback: Any, pct: int, msg: str) -> None:
@@ -102,33 +111,20 @@ def _update_progress(callback: Any, pct: int, msg: str) -> None:
 
 def _normalize_fields(records: list[dict[str, Any]], field_names: list[str]) -> list[dict[str, Any]]:
     """Normalize LLM-returned field names: field_N → real name, fill missing."""
-    # Build alias → real name mapping from schema
     alias_map: dict[str, str] = {}
     for i, fn in enumerate(field_names, 1):
         alias_map[f"field_{i}"] = fn
-
-    # Also map common lowercase variants
     for fn in field_names:
         key = fn.lower().replace(" ", "_")
         alias_map[key] = fn
 
     for rec in records:
-        # Detect None/null values from LLM (should trigger detail page visits)
-        for key in list(rec.keys()):
-            if rec[key] is None:
-                # Keep None — signals "needs detail page visit"
-                pass
-            elif rec[key] == "":
-                pass  # Empty = "not applicable"
-        # Map field_N → real name
         for key in list(rec.keys()):
             mapped = alias_map.get(key) or alias_map.get(key.lower().replace(" ", "_"))
             if mapped and mapped != key:
                 rec[mapped] = rec.pop(key)
-        # Ensure all schema fields exist (preserving None vs "")
         existing = set(rec.keys())
         for fn in field_names:
             if fn not in existing:
-                rec[fn] = None  # Not provided by LLM = needs detail page
-        # Keep profile_url for detail page visits — stripped later
+                rec[fn] = None
     return records

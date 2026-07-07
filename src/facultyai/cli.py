@@ -259,6 +259,92 @@ def export(config_path: str) -> None:
 
 @cli.command()
 @click.option("--config-path", default="config.yaml", help="Path to config file.")
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Show info-level logs.")
+@click.option("--debug", is_flag=True, default=False, help="Show debug-level logs (implies -v).")
+def discover(config_path: str, verbose: bool, debug: bool) -> None:
+    """Run department discovery for university-only entries in the input Excel."""
+    configure_logging(verbose=verbose, debug=debug)
+    cfg = load_config(config_path)
+    lock = LockManager()
+
+    if not lock.acquire():
+        console.print("[red]Another facultyai process is already running.[/]")
+        sys.exit(1)
+
+    try:
+
+        async def _run() -> None:
+            db = Database(cfg.files.database)
+            load_schema(cfg.files.schema_file)
+
+            async with db:
+                from .input_manager import sync_input_excel
+                from .llm_factory import get_llm
+
+                console.print("[bold blue]Discover[/] Loading input from Excel...")
+                inserted, deleted = await sync_input_excel(db, cfg.files.input_excel)
+                console.print(f"  Input sync: {inserted} rows kept, {deleted} removed.")
+
+                uni_rows = await db.get_input_universities()
+                uni_rows = [
+                    r for r in uni_rows
+                    if r.get("department") is None
+                    or str(r.get("department", "")).strip().lower() in ("", "none", "null", "nan")
+                ]
+
+                if not uni_rows:
+                    console.print("[yellow]No university-only entries to discover.[/]")
+                    return
+
+                # Skip rows already marked completed
+                to_process = []
+                for r in uni_rows:
+                    s = r.get("status")
+                    if s and str(s).strip().lower() not in ("", "none", "null", "nan"):
+                        console.print(f"  [dim]Skipping[/] {r['university']}: already completed")
+                    else:
+                        to_process.append(r)
+                uni_rows = to_process
+
+                console.print(f"  Found {len(uni_rows)} universities to discover departments for.")
+
+                llm = get_llm(cfg.llm)
+
+                for r in uni_rows:
+                    uni = r["university"]
+                    console.print(f"\n[cyan]Discovering departments for {uni}...[/]")
+
+                    from .scraper_graph import _discover_departments_impl
+
+                    link = r.get("link")
+                    state = {
+                        "university": uni,
+                        "page_url": str(link).strip() if link and str(link).strip().startswith("http") else "",
+                    }
+                    result = await _discover_departments_impl(state, cfg, llm, None)
+                    departments = result.get("discovered_departments", [])
+
+                    if departments:
+                        console.print(f"  [green]Found {len(departments)} departments:[/]")
+                        for d in departments:
+                            console.print(f"    - {d}")
+
+                        from .orchestrator import _append_departments_to_excel, _set_excel_status
+
+                        _set_excel_status(cfg.files.input_excel, uni, None, "completed")
+                        _append_departments_to_excel(cfg.files.input_excel, uni, departments)
+                        await sync_input_excel(db, cfg.files.input_excel)
+                        console.print(f"  [dim]Updated {cfg.files.input_excel} with {len(departments)} departments[/]")
+                    else:
+                        console.print("  [yellow]No departments found[/]")
+
+        _run_async(_run())
+    finally:
+        lock.release()
+
+
+@cli.command()
+@click.option("--config-path", default="config.yaml", help="Path to config file.")
 def chat(config_path: str) -> None:
     """Interactive chat agent for configuration & queries."""
     cfg = load_config(config_path)

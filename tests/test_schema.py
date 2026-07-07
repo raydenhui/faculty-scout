@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from facultyai.schema import Schema, build_extraction_prompt, load_schema
+from facultyai.schema import Schema, load_schema
 
 
 class TestSchemaLoading:
@@ -49,13 +49,3 @@ class TestFingerprint:
         ]
         s2 = Schema.model_validate(modified)
         assert s1.fingerprint() != s2.fingerprint()
-
-
-class TestExtractionPrompt:
-    def test_prompt_contains_column_names(self, sample_schema_file: Path) -> None:
-        schema = load_schema(sample_schema_file)
-        prompt = build_extraction_prompt(schema)
-        assert "English Full Name" in prompt
-        assert "Email" in prompt
-        assert "Institution" not in prompt  # static, not extracted
-        assert "JSON" in prompt

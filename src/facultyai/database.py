@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS input_universities (
     university TEXT NOT NULL,
     department TEXT,
     extra_info TEXT,
+    link TEXT,
     status TEXT,
     added_at TEXT DEFAULT (datetime('now')),
     UNIQUE(university, department)
@@ -149,6 +150,11 @@ class Database:
                 "ALTER TABLE input_universities ADD COLUMN status TEXT"
             )
             await self._connection.commit()
+        if "link" not in cols:
+            await self._connection.execute(
+                "ALTER TABLE input_universities ADD COLUMN link TEXT"
+            )
+            await self._connection.commit()
 
     async def __aenter__(self) -> Database:
         return await self.connect()
@@ -163,18 +169,20 @@ class Database:
         university: str,
         department: str | None = None,
         extra_info: str | None = None,
+        link: str | None = None,
         status: str | None = None,
     ) -> None:
         assert self._connection is not None
         await self._connection.execute(
             """
-            INSERT INTO input_universities(university, department, extra_info, status)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO input_universities(university, department, extra_info, link, status)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(university, department) DO UPDATE SET
                 extra_info=excluded.extra_info,
+                link=excluded.link,
                 status=excluded.status
             """,
-            (university, department, extra_info, status),
+            (university, department, extra_info, link, status),
         )
         await self._connection.commit()
 

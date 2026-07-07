@@ -2,7 +2,7 @@
 
 Graph:
     START ─► (dept missing? → discover_departments) ─► discover_url
-             ─► fetch_page ─► run_scrapegraph ─► validate_and_finalize ─► END
+             ─► fetch_page ─► run_scraper ─► validate_and_finalize ─► END
 
 Each node is wrapped with tenacity retry logic.  Results are cached via
 CacheManager and state is persisted for resume via LangGraph checkpointing.
@@ -11,7 +11,6 @@ Playwright is used as a fallback when a page requires JavaScript rendering.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from typing import Any, TypedDict
@@ -27,6 +26,7 @@ from .llm_factory import web_search
 from .logging_config import get_llm_logger, get_logger
 from .schema import Schema
 from .scraper import scrape
+from .scraper.html_cleaner import clean_html
 
 log = get_logger("graph")
 _llm_log = get_llm_logger()
@@ -43,6 +43,7 @@ class AgentState(TypedDict, total=False):
     university: str
     department: str | None
     listing_url: str | None
+    page_url: str
     page_html: str | None
     extracted_records: list[dict[str, Any]]
     error: str | None
@@ -69,7 +70,7 @@ def build_agent_graph(
     graph.add_node("discover_departments", _discover_departments_node(config, llm, cache))
     graph.add_node("discover_url", _discover_url_node(config, llm, cache))
     graph.add_node("fetch_page", _fetch_page_node(config, cache))
-    graph.add_node("run_scrapegraph", _run_scrapegraph_node(config, schema, llm, cache))
+    graph.add_node("run_scraper", _run_scraper_node(config, schema, llm, cache))
     graph.add_node("validate_and_finalize", _validate_and_finalize_node(config, schema))
 
     graph.set_conditional_entry_point(
@@ -81,8 +82,8 @@ def build_agent_graph(
     )
     graph.add_edge("discover_departments", END)
     graph.add_edge("discover_url", "fetch_page")
-    graph.add_edge("fetch_page", "run_scrapegraph")
-    graph.add_edge("run_scrapegraph", "validate_and_finalize")
+    graph.add_edge("fetch_page", "run_scraper")
+    graph.add_edge("run_scraper", "validate_and_finalize")
     graph.add_edge("validate_and_finalize", END)
 
     if checkpointer is not None:
@@ -129,48 +130,141 @@ async def _discover_departments_impl(
     state: AgentState,
     config: AppConfig,
     llm: BaseChatModel,
-    cache: CacheManager,
+    cache: CacheManager | None,
 ) -> AgentState:
     uni = state["university"]
+    all_depts: list[str] = []
     try:
-        query = f"{uni} departments"
+        page_url = state.get("page_url", "").strip()
+        page_html = ""
 
-        max_attempts = config.scraping.max_retries_per_step
-        search_results: list[dict[str, str]] = []
-        for attempt in range(max_attempts):
+        if page_url:
+            # Use provided link directly, skip search
+            log.info("discover_dept using provided link=%s", page_url)
+            html = await _http_fetch(page_url, config)
+            if not html:
+                html = await _playwright_fetch(page_url, config)
+            if html and len(html) > 1000:
+                page_html = html
+            else:
+                page_url = ""
+
+        if not page_url:
+            # Step 1: Search for a department listing page
+            query = f"{uni} academic departments list"
             search_results = await web_search(
                 query,
                 provider=config.search.provider,
                 api_key=config.search.bing_api_key,
                 max_results=5,
             )
-            if search_results:
+
+            # Step 2: Find and fetch a department listing page
+            for r in search_results:
+                url = r.get("href", "")
+                if not url or any(b in url for b in ("wikipedia", "linkedin", "facebook")):
+                    continue
+                html = await _http_fetch(url, config)
+                if not html:
+                    html = await _playwright_fetch(url, config)
+                if html and len(html) > 1000:
+                    page_url = url
+                    page_html = html
+                    break
+
+        # Step 3: LLM extracts departments from the page (with pagination)
+        current_url = page_url
+        current_html = page_html
+        page_num = 0
+        max_pages = 30
+        visited_pages: list[str] = []
+
+        while current_url and page_num < max_pages:
+            page_num += 1
+            html_len = len(current_html) if current_html else 0
+            log.info("discover_dept page %d url=%s len=%d", page_num, current_url, html_len)
+
+            # Build context of previously visited pages
+            prev_pages = ""
+            if visited_pages:
+                prev_pages = "Previously visited pages:\n" + "\n".join(
+                    f"  {i}. {u}" for i, u in enumerate(visited_pages, 1)
+                ) + "\n"
+
+            prompt = f"""From this university page, extract only ACADEMIC departments and schools.
+
+University: {uni}
+Current page URL: {current_url}
+{prev_pages}
+Rules:
+- Include ONLY academic teaching/research departments (e.g., Computer Science, Physics).
+- Exclude administrative offices (HR, Finance, IT, Library, Registrar).
+- Exclude research centres/labs unless they are full academic departments.
+- Exclude graduate schools, continuing education, professional studies.
+
+IMPORTANT — Pagination detection:
+The page likely uses alphabetical (A, B, C...) or numbered pagination.
+- Look at the PREVIOUSLY VISITED PAGES to detect the pattern.
+- If previous pages are: .../A.html, .../B.html, .../C.html,
+  the next page is .../D.html (next letter in alphabet).
+- If previous pages are: .../page/1, .../page/2,
+  the next page is .../page/3.
+- Look for ALL navigation links on the page (letters A-Z, numbers, "Next").
+- If the next page link exists in the HTML, use it.
+- If the link is NOT visible but can be INFERRED from the pattern,
+  construct it and set as "next_page_url".
+- If the current letter/number is the LAST one on this page,
+  set "next_page_url" to "".
+
+Return ONLY a JSON object:
+{{
+  "departments": ["Computer Science", "Physics", "Mathematics"],
+  "next_page_url": "https://..." or ""
+}}
+
+HTML:
+{clean_html(current_html) if current_html else "No page available."}"""
+
+            response = await llm.ainvoke(prompt)
+            text = _llm_response_text(response)
+            _llm_log.info("===== dept_discovery[%d] PROMPT =====\n%s\n===== END PROMPT =====", page_num, prompt)
+            _llm_log.info("===== dept_discovery[%d] RESPONSE =====\n%s\n===== END RESPONSE =====", page_num, text)
+            log.debug("dept discovery page %d response:\n%s", page_num, text[:500])
+
+            m = re.search(r"\{[\s\S]*\}", text.strip())
+            if m:
+                try:
+                    data = json.loads(m.group())
+                    depts = data.get("departments", [])
+                    if isinstance(depts, list):
+                        all_depts.extend(depts)
+                    next_url = data.get("next_page_url", "").strip()
+                except json.JSONDecodeError:
+                    break
+            else:
                 break
-            await asyncio.sleep(config.scraping.request_delay_sec * (attempt + 1))
 
-        urls_text = "\n".join(r["href"] for r in search_results if r.get("href"))
+            # Record current page as visited before moving to next
+            visited_pages.append(current_url)
+            current_url = next_url
 
-        prompt = f"""Given the university "{uni}", find all academic departments/schools.
-From these search result URLs, suggest the most likely departments. If you cannot determine exact departments,
-return a list of common department names for this type of institution.
+            if current_url and current_url != page_url:
+                current_html = await _http_fetch(current_url, config)
+                if not current_html:
+                    current_html = await _playwright_fetch(current_url, config)
+                if not current_html:
+                    break
+            else:
+                break
 
-Search results:
-{urls_text or "No URLs available. Please use your knowledge of this university."}
+        # LLM deduplication: remove semantic duplicates
+        unique_deduped = await _llm_dedup_departments(all_depts, uni, llm)
 
-Return ONLY a JSON list of department name strings, like: ["Computer Science", "Physics", "Mathematics"]"""
+        state["discovered_departments"] = unique_deduped
+        log.info("dept discovery done: %d departments from %d pages", len(unique_deduped), page_num)
 
-        response = await llm.ainvoke(prompt)
-        text = _llm_response_text(response)
-
-        json_match = re.search(r"\[.*?\]", text, re.DOTALL)
-        if json_match:
-            depts = json.loads(json_match.group())
-            if isinstance(depts, list):
-                state["discovered_departments"] = depts
-                return state
-
-        state["discovered_departments"] = []
     except Exception as e:
+        log.warning("department discovery failed: %s", e)
         state["discovered_departments"] = []
         state["error"] = str(e)
 
@@ -194,6 +288,12 @@ async def _discover_url_impl(
     llm: BaseChatModel,
     cache: CacheManager,
 ) -> AgentState:
+    # If listing_url already provided, validate it, else fall through to discovery
+    provided = state.get("listing_url")
+    if provided and str(provided).startswith("http"):
+        log.info("discover_url using provided listing_url=%s", provided)
+        return state
+
     uni = state["university"]
     dept = state["department"] or ""
 
@@ -400,7 +500,7 @@ def _has_content(html: str) -> bool:
     return len(text.strip()) > 200
 
 
-def _run_scrapegraph_node(
+def _run_scraper_node(
     config: AppConfig,
     schema: Schema,
     llm: BaseChatModel,
@@ -459,6 +559,67 @@ async def _run_scraper_impl(
         state["extracted_records"] = []
 
     return state
+
+
+async def _llm_dedup_departments(
+    departments: list[str],
+    university: str,
+    llm: BaseChatModel,
+) -> list[str]:
+    """Use LLM to remove semantically duplicate department names."""
+    if not departments:
+        return []
+
+    # First pass: simple string dedup
+    seen: set[str] = set()
+    unique: list[str] = []
+    for d in departments:
+        key = d.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(d.strip())
+
+    if len(unique) <= 1:
+        return unique
+
+    dept_list = "\n".join(f"  - {d}" for d in unique)
+
+    prompt = f"""Review this list of academic departments at {university} and remove duplicates.
+
+The list may contain the same department expressed in different formats:
+- "Computer Science, Department of" and "Department of Computer Science" → same
+- "Computing, School of" and "School of Computing" → same
+- "Physics" and "Department of Physics" → same (keep the shorter version)
+- "Mathematics" and "Applied Mathematics" → DIFFERENT (keep both)
+- "Biology" and "Biological Sciences" → same (keep the shorter version)
+- "Electrical and Computer Engineering" and "Computer Engineering" → DIFFERENT (keep both)
+
+Department list:
+{dept_list}
+
+Return ONLY a JSON array of the deduplicated department names:
+["Computer Science", "Physics", "Mathematics"]"""
+
+    try:
+        response = await llm.ainvoke(prompt)
+        text = _llm_response_text(response)
+        _llm_log.info("===== dept_dedup PROMPT =====\n%s\n===== END PROMPT =====", prompt)
+        _llm_log.info("===== dept_dedup RESPONSE =====\n%s\n===== END RESPONSE =====", text)
+    except Exception as e:
+        log.warning("dept dedup LLM failed: %s", e)
+        return unique
+
+    m = re.search(r"\[.*?\]", text, re.DOTALL)
+    if m:
+        try:
+            deduped = json.loads(m.group())
+            if isinstance(deduped, list):
+                log.info("dept dedup: %d → %d departments", len(unique), len(deduped))
+                return deduped
+        except json.JSONDecodeError:
+            pass
+
+    return unique
 
 
 def _validate_and_finalize_node(

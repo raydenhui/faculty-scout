@@ -43,9 +43,9 @@ async def sync_input_excel(
             if "department_name" in df.columns and row["department_name"]
             else None
         )
-        extra = (
-            str(row["extra_info"]).strip()
-            if "extra_info" in df.columns and row["extra_info"]
+        link = (
+            str(row["link"]).strip()
+            if "link" in df.columns and row.get("link")
             else None
         )
         status = None
@@ -54,7 +54,7 @@ async def sync_input_excel(
             if raw is not None and str(raw).strip().lower() not in ("", "none", "null", "nan"):
                 status = str(raw).strip()
         file_rows.add((uni, dept))
-        await db.upsert_input_university(uni, dept, extra or None, status=status)
+        await db.upsert_input_university(uni, dept, link=link, status=status)
 
     db_rows = await db.get_input_universities()
     deleted = 0

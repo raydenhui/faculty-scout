@@ -74,33 +74,3 @@ def load_schema(path: str | Path = "schema.json") -> Schema:
         return Schema()
     data = json.loads(path.read_text(encoding="utf-8"))
     return Schema.model_validate(data)
-
-
-def build_extraction_prompt(schema: Schema) -> str:
-    """Build the ScrapeGraphAI prompt from extracted columns and hints.
-
-    Designed for DepthSearchGraph (depth=1): the LLM visits the listing page
-    AND individual profile pages, so it can extract listing-level fields
-    (name, title, position) AND detail-level fields (email, profile URL).
-    """
-    lines = []
-    for c in schema.extracted_columns():
-        hint_text = f"  — {c.hint}" if c.hint else ""
-        lines.append(f'  "{c.name}"{hint_text}')
-    fields = "\n".join(lines)
-    names = ", ".join(f'"{c.name}"' for c in schema.extracted_columns())
-    return (
-        "You are crawling a university faculty directory. You will visit the main "
-        "listing page AND follow links to individual professor profile pages. "
-        "Extract the following fields for every faculty member from ALL pages "
-        "you visit:\n\n"
-        f"{fields}\n\n"
-        "Important:\n"
-        "- Basic info (name, title, position) is usually on the listing page.\n"
-        "- Email, profile URL, and detailed bio are usually on the individual "
-        "profile page — look for lines like 'Email: xxx@xxx.edu'.\n"
-        "- Fill in every field you can find. Leave missing fields as empty strings.\n\n"
-        "Return ONLY a JSON array of objects. Each object MUST use exactly these keys: "
-        f"[{names}].\n"
-        "Example: [{" + f'"{schema.extracted_columns()[0].name}": "Dr. John Smith"' + "}]"
-    )

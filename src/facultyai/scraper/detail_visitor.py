@@ -11,9 +11,7 @@ import asyncio
 import json
 import re
 from typing import Any
-from urllib.parse import urljoin
 
-from bs4 import BeautifulSoup
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from ..config import AppConfig
@@ -41,28 +39,13 @@ async def visit_detail_pages(
     progress_callback: Any = None,
 ) -> list[dict[str, str]]:
     """LLM-only detail page extraction. None for truly unfound fields."""
-    follow_selector = analysis.get("follow_link_selector", "")
 
-    # Collect detail URLs: from CSS selector OR from records' profile_url field
+    # Collect detail URLs from records' profile_url field
     detail_urls: list[tuple[int, str]] = []
-
-    if follow_selector:
-        soup = BeautifulSoup(listing_html, "html.parser")
-        items = soup.select(analysis.get("item_selector", ""))
-        for idx, item in enumerate(items):
-            if idx >= len(records):
-                break
-            link_el = item.select_one(follow_selector)
-            if link_el and link_el.get("href"):
-                href = link_el["href"].strip()
-                full_url = urljoin(listing_url, href)
-                detail_urls.append((idx, full_url))
-    else:
-        # Direct mode: use profile_url from records
-        for idx, rec in enumerate(records):
-            pu = rec.get("profile_url") or rec.get("Profile URL") or ""
-            if pu and pu.startswith("http"):
-                detail_urls.append((idx, pu))
+    for idx, rec in enumerate(records):
+        pu = rec.get("profile_url") or rec.get("Profile URL") or ""
+        if pu and pu.startswith("http"):
+            detail_urls.append((idx, pu))
 
     if not detail_urls:
         log.info("visit_detail_pages no detail links found")
@@ -82,46 +65,48 @@ async def visit_detail_pages(
 
     log.info("visit_detail_pages missing fields: %s", missing_fields)
 
-    # Process detail pages sequentially with consecutive-failure detection
-    to_process = detail_urls[:50]
+    # Process ALL detail pages, stop on 5 consecutive error pages
+    to_process = detail_urls
     log.info("visit_detail_pages processing %d detail pages", len(to_process))
 
-    consecutive_failures = 0
+    consecutive_errors = 0
     sem = asyncio.Semaphore(MAX_CONCURRENT)
 
-    async def _process(idx: int, url: str) -> bool:
-        nonlocal consecutive_failures
+    async def _process(idx: int, url: str) -> bool | None:
+        """True=data found, False=no data (page ok), None=error page."""
+        nonlocal consecutive_errors
         async with sem:
             html = await _fetch_one_url(url, config)
             if not html or len(html) < 500:
                 _add_remark(records[idx], f"Detail page unreachable: {url}")
-                return False
+                return None  # error page
 
             result = await _llm_extract_detail(clean_html(html), extract_fields, schema, url, llm)
             if result is None:
                 _add_remark(records[idx], f"LLM extraction failed for: {url}")
-                return False
+                return None  # error page
 
-            got_data = False
+            found_any = False
             for field_name, value in result.items():
                 if value is None:
                     pass  # LLM decides what goes in Remark
                 elif field_name in records[idx] and records[idx].get(field_name) in (None, "") and value:
                     records[idx][field_name] = str(value)
-                    got_data = True
-            return got_data
+                    found_any = True
+            return found_any  # True=got data, False=page ok but no fields found
 
     for processed, (idx, url) in enumerate(to_process, 1):
-        success = await _process(idx, url)
-        if success:
-            consecutive_failures = 0
-        else:
-            consecutive_failures += 1
-            if consecutive_failures >= 5:
-                log.info("visit_detail_pages abandoning after %d consecutive failures", consecutive_failures)
-                _add_remark(records[idx], f"Abandoned detail pages after {consecutive_failures} consecutive failures")
+        result = await _process(idx, url)
+        if result is True:
+            consecutive_errors = 0  # got data, reset
+        elif result is None:
+            consecutive_errors += 1  # error page
+            if consecutive_errors >= 5:
+                log.warning("visit_detail_pages abandoning after %d consecutive error pages", consecutive_errors)
+                _add_remark(records[idx], f"Abandoned after {consecutive_errors} consecutive error pages")
                 break
-        # Update progress: 50%% + (processed/total) * 50%%
+        # else: result is False → page loaded but no fields found, OK, don't count
+
         if progress_callback:
             pct = 50 + int(50 * processed / len(to_process))
             progress_callback(pct, f"Profile pages: {processed}/{len(to_process)}")

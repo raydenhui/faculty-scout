@@ -56,9 +56,13 @@ async def run_pipeline(
         for r in uni_rows:
             uni = r["university"]
             dept = r.get("department")
+            # Normalize empty-like values to None for discovery triggering
+            if dept is not None and str(dept).strip().lower() in ("", "none", "null", "nan"):
+                dept = None
 
             # Skip rows already marked complete in Excel
             excel_status = r.get("status")
+            log.debug("status check uni=%s dept=%s raw_status=%s", uni, dept, repr(excel_status))
             if excel_status and str(excel_status).strip().lower() not in ("", "none", "null", "nan"):
                 console.print(
                     f"  [dim]Skipping[/] {uni}/{dept or 'All'}: "
@@ -70,7 +74,13 @@ async def run_pipeline(
                 await db.upsert_job(uni, None, job_type="discovery", status="pending")
                 discovery_jobs += 1
             else:
-                await db.upsert_job(uni, dept, job_type="scrape", status="pending")
+                link = r.get("link")
+                raw_link = str(link).strip() if link else ""
+                if raw_link.lower() in ("", "none", "null", "nan"):
+                    raw_link = ""
+                url = raw_link if raw_link.startswith("http") else None
+                await db.upsert_job(uni, dept, job_type="scrape", status="pending",
+                                    listing_url=url)
                 scrape_jobs += 1
 
         console.print(f"  Queued {discovery_jobs} discovery jobs, {scrape_jobs} scrape jobs.")
@@ -116,6 +126,7 @@ async def run_pipeline(
                     job["university"],
                     None,
                     "completed",
+                    link=result.get("page_url", ""),
                 )
 
                 # Append discovered departments as new rows in the Excel
@@ -159,6 +170,7 @@ async def run_pipeline(
                                 "university": job["university"],
                                 "department": job.get("department"),
                                 "need_discovery": False,
+                                "listing_url": job.get("listing_url"),
                             }
 
                             # Set progress callback via module-level variable (not serializable)
@@ -211,6 +223,7 @@ async def run_pipeline(
                                         job["university"],
                                         job.get("department"),
                                         f"failed: {graph_error}",
+                                        link=result.get("listing_url") or "",
                                     )
                                     progress.update(task, advance=1)
                                     return
@@ -254,11 +267,13 @@ async def run_pipeline(
                                      export_count, job["university"], job.get("department"))
 
                             # Write completed status to Excel
+                            # Write completed status + link to Excel
                             _set_excel_status(
                                 config.files.input_excel,
                                 job["university"],
                                 job.get("department"),
                                 "completed",
+                                link=result.get("listing_url") or "",
                             )
                         except Exception as e:
                             console.print(
@@ -272,6 +287,7 @@ async def run_pipeline(
                                 job["university"],
                                 job.get("department"),
                                 f"failed: {str(e)[:100]}",
+                                link=result.get("listing_url", "") if "result" in dir() else "",
                             )
                         finally:
                             progress.update(task, advance=1)
@@ -311,8 +327,9 @@ def _set_excel_status(
     university: str,
     department: str | None,
     status: str,
+    link: str | None = None,
 ) -> None:
-    """Write a status value back to the input Excel file for a given row."""
+    """Write status and link back to the input Excel file."""
     from pathlib import Path
 
     import pandas as pd
@@ -325,16 +342,21 @@ def _set_excel_status(
     df = df.where(pd.notna(df), None)
     df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
 
-    # Ensure status column exists and is object dtype
     if "status" not in df.columns:
         df["status"] = None
     df["status"] = df["status"].astype(object)
+
+    if "link" not in df.columns:
+        df["link"] = None
+    df["link"] = df["link"].astype(object)
 
     for idx, row in df.iterrows():
         row_uni = str(row["university_name"]).strip()
         row_dept = str(row.get("department_name", "")).strip() if row.get("department_name") else ""
         if row_uni == university and (row_dept == (department or "") or (not row_dept and not department)):
             df.at[idx, "status"] = status
+            if link:
+                df.at[idx, "link"] = link
 
     # Restore original column name casing for output
     df.columns = [c.replace("_", " ").title() for c in df.columns]
