@@ -43,9 +43,13 @@ dev = [
     "ruff>=0.3,<0.5",
     "mypy>=1.8,<2.0",
 ]
+mcp = [
+    "mcp>=1.0",
+]
 
 [project.scripts]
 facultyai = "facultyai.cli:cli"
+facultyai-mcp = "facultyai.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

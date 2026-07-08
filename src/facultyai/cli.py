@@ -28,6 +28,13 @@ def _run_async(coro):
         pass
 
 
+def _emit_json(result: dict) -> None:
+    """Print a structured result as JSON to stdout and exit accordingly."""
+    click.echo(json.dumps(result, ensure_ascii=False, default=str))
+    if not result.get("success", False):
+        sys.exit(1)
+
+
 @click.group()
 @click.version_option(__version__, prog_name="facultyai")
 def cli() -> None:
@@ -39,9 +46,16 @@ def cli() -> None:
 @click.option("--retry-failed", is_flag=True, default=False, help="Retry previously failed jobs.")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show info-level logs.")
 @click.option("--debug", is_flag=True, default=False, help="Show debug-level logs (implies -v).")
-def run(config_path: str, retry_failed: bool, verbose: bool, debug: bool) -> None:
+@click.option("--json", "json_out", is_flag=True, default=False, help="Emit machine-readable JSON to stdout.")
+def run(config_path: str, retry_failed: bool, verbose: bool, debug: bool, json_out: bool) -> None:
     """Start/run all pending jobs."""
     configure_logging(verbose=verbose, debug=debug)
+    if json_out:
+        from .agent_api import run as api_run
+
+        result = _run_async(api_run(config_path, retry_failed=retry_failed))
+        _emit_json(result)
+        return
     _run_with_lock(config_path, retry_failed=retry_failed)
 
 
@@ -152,8 +166,16 @@ def retry(config_path: str, university: str, department: str | None, verbose: bo
 
 @cli.command()
 @click.option("--config-path", default="config.yaml", help="Path to config file.")
-def status(config_path: str) -> None:
+@click.option("--json", "json_out", is_flag=True, default=False, help="Emit machine-readable JSON to stdout.")
+def status(config_path: str, json_out: bool) -> None:
     """Show job statuses and run history."""
+    if json_out:
+        from .agent_api import get_status
+
+        result = _run_async(get_status(config_path))
+        _emit_json(result)
+        return
+
     cfg = load_config(config_path)
 
     async def _run() -> None:
@@ -241,49 +263,61 @@ def status(config_path: str) -> None:
 
 @cli.command()
 @click.option("--config-path", default="config.yaml", help="Path to config file.")
-def export(config_path: str) -> None:
-    """Regenerate Excel output from database."""
-    cfg = load_config(config_path)
+@click.option("--format", "fmt", type=click.Choice(["excel", "json"]), default="excel", help="Output format.")
+@click.option("--output", "output_path", default=None, help="Output file path (overrides config).")
+@click.option("--json", "json_out", is_flag=True, default=False, help="Emit machine-readable JSON result to stdout.")
+def export(config_path: str, fmt: str, output_path: str | None, json_out: bool) -> None:
+    """Regenerate output (Excel or JSON) from database."""
+    from .agent_api import export as api_export
 
-    async def _run() -> None:
-        db = Database(cfg.files.database)
-        schema = load_schema(cfg.files.schema_file)
-        async with db:
-            from .exporter import export_to_excel
-
-            rows = await export_to_excel(db, schema, cfg.files.output_excel)
-            console.print(f"[green]{cfg.files.output_excel}[/] written ({rows} rows).")
-
-    _run_async(_run())
+    result = _run_async(api_export(config_path, fmt=fmt, output_path=output_path))
+    if json_out:
+        _emit_json(result)
+        return
+    if result.get("success"):
+        d = result["data"]
+        console.print(f"[green]{d['path']}[/] written ({d['count']} records).")
+    else:
+        console.print(f"[red]Export failed:[/] {result['error']['message']}")
+        sys.exit(1)
 
 
 @cli.command()
 @click.option("--config-path", default="config.yaml", help="Path to config file.")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show info-level logs.")
 @click.option("--debug", is_flag=True, default=False, help="Show debug-level logs (implies -v).")
-def discover(config_path: str, verbose: bool, debug: bool) -> None:
+@click.option("--json", "json_out", is_flag=True, default=False, help="Emit machine-readable JSON to stdout.")
+def discover(config_path: str, verbose: bool, debug: bool, json_out: bool) -> None:
     """Run department discovery for university-only entries in the input Excel."""
     configure_logging(verbose=verbose, debug=debug)
     cfg = load_config(config_path)
     lock = LockManager()
 
     if not lock.acquire():
+        if json_out:
+            _emit_json({"success": False, "error": {"code": "LOCKED",
+                        "message": "Another facultyai process is already running."}})
         console.print("[red]Another facultyai process is already running.[/]")
         sys.exit(1)
 
     try:
 
-        async def _run() -> None:
+        async def _run() -> dict:
             db = Database(cfg.files.database)
             load_schema(cfg.files.schema_file)
+            collected: list[dict] = []
+
+            def _p(*args, **kwargs):
+                if not json_out:
+                    console.print(*args, **kwargs)
 
             async with db:
                 from .input_manager import sync_input_excel
                 from .llm_factory import get_llm
 
-                console.print("[bold blue]Discover[/] Loading input from Excel...")
+                _p("[bold blue]Discover[/] Loading input from Excel...")
                 inserted, deleted = await sync_input_excel(db, cfg.files.input_excel)
-                console.print(f"  Input sync: {inserted} rows kept, {deleted} removed.")
+                _p(f"  Input sync: {inserted} rows kept, {deleted} removed.")
 
                 uni_rows = await db.get_input_universities()
                 uni_rows = [
@@ -293,26 +327,26 @@ def discover(config_path: str, verbose: bool, debug: bool) -> None:
                 ]
 
                 if not uni_rows:
-                    console.print("[yellow]No university-only entries to discover.[/]")
-                    return
+                    _p("[yellow]No university-only entries to discover.[/]")
+                    return {"universities": collected}
 
                 # Skip rows already marked completed
                 to_process = []
                 for r in uni_rows:
                     s = r.get("status")
                     if s and str(s).strip().lower() not in ("", "none", "null", "nan"):
-                        console.print(f"  [dim]Skipping[/] {r['university']}: already completed")
+                        _p(f"  [dim]Skipping[/] {r['university']}: already completed")
                     else:
                         to_process.append(r)
                 uni_rows = to_process
 
-                console.print(f"  Found {len(uni_rows)} universities to discover departments for.")
+                _p(f"  Found {len(uni_rows)} universities to discover departments for.")
 
                 llm = get_llm(cfg.llm)
 
                 for r in uni_rows:
                     uni = r["university"]
-                    console.print(f"\n[cyan]Discovering departments for {uni}...[/]")
+                    _p(f"\n[cyan]Discovering departments for {uni}...[/]")
 
                     from .scraper_graph import _discover_departments_impl
 
@@ -323,24 +357,106 @@ def discover(config_path: str, verbose: bool, debug: bool) -> None:
                     }
                     result = await _discover_departments_impl(state, cfg, llm, None)
                     departments = result.get("discovered_departments", [])
+                    collected.append({"university": uni, "departments": departments})
 
                     if departments:
-                        console.print(f"  [green]Found {len(departments)} departments:[/]")
+                        _p(f"  [green]Found {len(departments)} departments:[/]")
                         for d in departments:
-                            console.print(f"    - {d}")
+                            _p(f"    - {d}")
 
                         from .orchestrator import _append_departments_to_excel, _set_excel_status
 
                         _set_excel_status(cfg.files.input_excel, uni, None, "completed")
                         _append_departments_to_excel(cfg.files.input_excel, uni, departments)
                         await sync_input_excel(db, cfg.files.input_excel)
-                        console.print(f"  [dim]Updated {cfg.files.input_excel} with {len(departments)} departments[/]")
+                        _p(f"  [dim]Updated {cfg.files.input_excel} with {len(departments)} departments[/]")
                     else:
-                        console.print("  [yellow]No departments found[/]")
+                        _p("  [yellow]No departments found[/]")
 
-        _run_async(_run())
+            return {"universities": collected}
+
+        data = _run_async(_run())
+        if json_out:
+            _emit_json({"success": True, "data": data})
     finally:
         lock.release()
+
+
+@cli.command()
+@click.option("--config-path", default="config.yaml", help="Path to config file.")
+@click.argument("university")
+@click.argument("department", required=False)
+@click.option("--link", default=None, help="Pre-filled listing URL for this target.")
+@click.option("--json", "json_out", is_flag=True, default=False, help="Emit JSON to stdout.")
+def add_target(
+    config_path: str, university: str, department: str | None, link: str | None, json_out: bool
+) -> None:
+    """Add a scrape target (university + optional department) to the queue."""
+    from .agent_api import add_target as api_add
+
+    result = _run_async(api_add(university, department, link, config_path=config_path))
+    if json_out:
+        _emit_json(result)
+        return
+    if result.get("success"):
+        d = result["data"]
+        console.print(f"[green]Added[/] {d['university']}/{d['department'] or 'All'}")
+    else:
+        console.print(f"[red]Error:[/] {result['error']['message']}")
+        sys.exit(1)
+
+
+@cli.command()
+@click.option("--config-path", default="config.yaml", help="Path to config file.")
+@click.option("--json", "json_out", is_flag=True, default=False, help="Emit JSON to stdout.")
+def targets(config_path: str, json_out: bool) -> None:
+    """List all scrape targets in the input queue."""
+    from .agent_api import list_targets
+
+    result = _run_async(list_targets(config_path))
+    if json_out:
+        _emit_json(result)
+        return
+    if result.get("success"):
+        rows = result["data"]["targets"]
+        if not rows:
+            console.print("[yellow]No targets configured.[/]")
+        else:
+            table = Table(title="Scrape Targets")
+            table.add_column("University", style="cyan")
+            table.add_column("Department")
+            table.add_column("Status")
+            table.add_column("Link", style="dim")
+            for t in rows:
+                table.add_row(
+                    t["university"], t["department"] or "All",
+                    t["status"] or "", (t["link"] or "")[:50],
+                )
+            console.print(table)
+
+
+@cli.command()
+@click.option("--config-path", default="config.yaml", help="Path to config file.")
+@click.option("--university", default=None, help="Filter by university.")
+@click.option("--department", default=None, help="Filter by department.")
+@click.option("--json", "json_out", is_flag=True, default=False, help="Emit JSON to stdout.")
+def results(config_path: str, university: str | None, department: str | None, json_out: bool) -> None:
+    """Show extracted faculty records from the database."""
+    from .agent_api import get_results
+
+    result = _run_async(get_results(config_path, university, department))
+    if json_out:
+        _emit_json(result)
+        return
+    if result.get("success"):
+        d = result["data"]
+        console.print(f"[green]{d['count']}[/] faculty records.")
+        for rec in d["records"][:20]:
+            name = rec.get("English Full Name", "?")
+            email = rec.get("Email", "-")
+            console.print(f"  {name}  [dim]{email}[/]")
+        if d["count"] > 20:
+            console.print(f"  [dim]... and {d['count'] - 20} more (use --json for all)[/]")
 
 
 @cli.command()
