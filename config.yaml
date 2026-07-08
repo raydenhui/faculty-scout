@@ -22,10 +22,7 @@ scraping:
   max_concurrent_jobs: 3
   max_retries_per_step: 3
   request_delay_sec: 1.0
-  use_scrapegraphai: true               # primary extraction engine (deprecated)
-  deep_extraction: true                 # follow profile links for detail info
   max_detail_pages: 5                   # limit detail pages per job
-  item_extract_mode: direct  # "split" = CSS selector item split (cell 2a→2b); "direct" = LLM outputs all items in one JSON
 
 files:
   input_excel: "universities.xlsx"

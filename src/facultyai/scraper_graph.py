@@ -238,7 +238,7 @@ HTML:
                     depts = data.get("departments", [])
                     if isinstance(depts, list):
                         all_depts.extend(depts)
-                    next_url = data.get("next_page_url", "").strip()
+                    next_url = (data.get("next_page_url") or "").strip()
                 except json.JSONDecodeError:
                     break
             else:
@@ -664,9 +664,13 @@ def _validate_column(val: str, v: Any, llm: BaseChatModel | None = None) -> str:
     """Apply validation rules. If llm is provided, ask LLM about violations."""
     import re
 
-    if v.regex and val and not re.match(v.regex, val, re.IGNORECASE if v.regex.startswith("^") else 0):
-        return ""
+    if v.regex and val:
+        flags = re.IGNORECASE if getattr(v, "case_insensitive", False) else 0
+        if not re.match(v.regex, val, flags):
+            return ""
     if v.max_length is not None and len(val) > v.max_length:
+        return ""
+    if v.min_length is not None and val and len(val) < v.min_length:
         return ""
     if v.contains_cjk and val and not re.search(r"[\u4e00-\u9fff\u3400-\u4dbf]", val):
         return ""

@@ -76,19 +76,17 @@ async def scrape(
         return []
 
     # 50% — listing extraction done
-    has_detail = len(all_records) > 0
     _update_progress(progress_callback, 50,
                      f"Extracted {len(all_records)} entries, visiting profile pages...")
 
     # Detail page extraction for missing fields
-    if has_detail:
-        analysis_dict = {"has_detail_pages": True, "static_values": {}}
-        all_records = await visit_detail_pages(
-            html, url, all_records, analysis_dict, field_names, schema, llm, config,
-            progress_callback=progress_callback,
-        )
-        log.info("scrape after detail pages: %d records", len(all_records))
-        _update_progress(progress_callback, 100, f"Done — {len(all_records)} entries")
+    analysis_dict = {"has_detail_pages": True, "static_values": {}}
+    all_records = await visit_detail_pages(
+        html, url, all_records, analysis_dict, field_names, schema, llm, config,
+        progress_callback=progress_callback,
+    )
+    log.info("scrape after detail pages: %d records", len(all_records))
+    _update_progress(progress_callback, 100, f"Done — {len(all_records)} entries")
 
     for rec in all_records:
         rec.pop("profile_url", None)

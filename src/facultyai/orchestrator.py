@@ -43,6 +43,13 @@ async def run_pipeline(
     uni_rows = await db.get_input_universities()
     console.print(f"  Loaded {len(uni_rows)} university entries from DB.")
 
+    # Debug: show all rows with their status
+    log.debug("input rows after sync:")
+    for r in uni_rows:
+        log.debug("  uni=%s dept=%s status=%s link=%s",
+                   r["university"], r.get("department"), repr(r.get("status")),
+                   (r.get("link") or "")[:50])
+
     if not uni_rows:
         console.print("[yellow]No university entries to process.[/]")
         return {"total": 0, "successful": 0, "failed": 0}
@@ -165,6 +172,7 @@ async def run_pipeline(
                     async with semaphore:
                         jid = job["job_id"]
                         await db.update_job_status(jid, "running")
+                        result: dict[str, Any] | None = None
                         try:
                             state = {
                                 "university": job["university"],
@@ -287,7 +295,7 @@ async def run_pipeline(
                                 job["university"],
                                 job.get("department"),
                                 f"failed: {str(e)[:100]}",
-                                link=result.get("listing_url", "") if "result" in dir() else "",
+                                link=result.get("listing_url", "") if result else "",
                             )
                         finally:
                             progress.update(task, advance=1)

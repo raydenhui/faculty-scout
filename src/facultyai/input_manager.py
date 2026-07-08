@@ -37,6 +37,9 @@ async def sync_input_excel(
 
     file_rows: set[tuple[str, str | None]] = set()
     for _, row in df.iterrows():
+        # Skip blank rows (no university name)
+        if row["university_name"] is None or not str(row["university_name"]).strip():
+            continue
         uni = str(row["university_name"]).strip()
         dept = (
             str(row["department_name"]).strip()

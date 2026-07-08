@@ -87,10 +87,13 @@ def _rows_from_db(
     formula_cols: list[tuple[int, Any]],
 ) -> list[list[Any]]:
     new_data: list[list[Any]] = []
-    for r in db_rows:
+    for row_offset, r in enumerate(db_rows):
         parsed = json.loads(r["data_json"] or "{}")
         parsed["university_name"] = r["university"]
         parsed["department"] = r["department"]
+
+        # Excel row number: header is row 1, so first data row is row 2
+        excel_row = row_offset + 2
 
         record: list[Any] = [None] * len(headers)
         for col in schema.extracted_columns():
@@ -104,7 +107,7 @@ def _rows_from_db(
                 record[idx] = col.value or ""
         for idx, col in formula_cols:
             raw = _resolve_formula(col.formula or "", col_map)
-            record[idx] = raw
+            record[idx] = raw.replace("{row}", str(excel_row))
         new_data.append(record)
     return new_data
 
