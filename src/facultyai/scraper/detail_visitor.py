@@ -8,6 +8,7 @@ only the missing fields. Tracks failures in a "Remark" column.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 from typing import Any
@@ -65,51 +66,55 @@ async def visit_detail_pages(
 
     log.info("visit_detail_pages missing fields: %s", missing_fields)
 
-    # Process ALL detail pages, stop on 5 consecutive error pages
+    # Process ALL detail pages concurrently (with concurrency limit)
     to_process = detail_urls
     log.info("visit_detail_pages processing %d detail pages", len(to_process))
 
-    consecutive_errors = 0
+    total_errors = 0
+    error_lock = asyncio.Lock()
     sem = asyncio.Semaphore(MAX_CONCURRENT)
 
     async def _process(idx: int, url: str) -> bool | None:
         """True=data found, False=no data (page ok), None=error page."""
-        nonlocal consecutive_errors
+        nonlocal total_errors
         async with sem:
+            async with error_lock:
+                if total_errors >= 5:
+                    return None
             html = await _fetch_one_url(url, config)
             if not html or len(html) < 500:
                 _add_remark(records[idx], f"Detail page unreachable: {url}")
-                return None  # error page
+                async with error_lock:
+                    total_errors += 1
+                return None
 
             result = await _llm_extract_detail(clean_html(html), extract_fields, schema, url, llm)
             if result is None:
                 _add_remark(records[idx], f"LLM extraction failed for: {url}")
-                return None  # error page
+                async with error_lock:
+                    total_errors += 1
+                return None
 
             found_any = False
             for field_name, value in result.items():
                 if value is None:
-                    pass  # LLM decides what goes in Remark
+                    pass
                 elif field_name in records[idx] and records[idx].get(field_name) in (None, "") and value:
                     records[idx][field_name] = str(value)
                     found_any = True
-            return found_any  # True=got data, False=page ok but no fields found
+            return found_any
 
-    for processed, (idx, url) in enumerate(to_process, 1):
-        result = await _process(idx, url)
-        if result is True:
-            consecutive_errors = 0  # got data, reset
-        elif result is None:
-            consecutive_errors += 1  # error page
-            if consecutive_errors >= 5:
-                log.warning("visit_detail_pages abandoning after %d consecutive error pages", consecutive_errors)
-                _add_remark(records[idx], f"Abandoned after {consecutive_errors} consecutive error pages")
-                break
-        # else: result is False → page loaded but no fields found, OK, don't count
+    tasks = [_process(idx, url) for idx, url in to_process]
+    results = await asyncio.gather(*tasks)
 
-        if progress_callback:
-            pct = 50 + int(50 * processed / len(to_process))
-            progress_callback(pct, f"Profile pages: {processed}/{len(to_process)}")
+    if total_errors >= 5:
+        log.warning("visit_detail_pages abandoned after %d+ error pages", total_errors)
+        _add_remark(records[0], f"Abandoned after {total_errors}+ error pages")
+
+    if progress_callback:
+        completed = sum(1 for r in results if r is True)
+        pct = 50 + int(50 * (len(to_process) - total_errors) / len(to_process))
+        progress_callback(pct, f"Profile pages: {completed}/{len(to_process)}")
 
     return records
 
@@ -238,21 +243,67 @@ async def _fetch_one_url(url: str, config: AppConfig) -> str | None:
 
 
 async def _playwright_fetch(url: str, config: AppConfig) -> str | None:
-    try:
-        from playwright.async_api import async_playwright
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=config.scraping.headless)
-            page = await browser.new_page()
-            try:
-                await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
-                                wait_until="domcontentloaded")
-                await asyncio.sleep(2)
-                html = await page.content()
-                return html
-            finally:
-                await browser.close()
-    except Exception:
-        pass
+    for attempt in range(2):
+        headless = config.scraping.headless and attempt == 0
+        try:
+            from playwright.async_api import async_playwright
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(
+                    headless=headless,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                    ] if headless else [],
+                )
+                context = await browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/128.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1280, "height": 900},
+                    locale="en-US",
+                )
+                page = await context.new_page()
+                try:
+                    await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
+                                    wait_until="domcontentloaded")
+                    # Wait for JS-rendered content to appear
+                    content_selectors = [
+                        "tr[class]", "div[class*='people']", "div[class*='staff']",
+                        "div[class*='person']", "div[class*='profile']", ".member",
+                        "li[class]", "table[class]", "*[data-member]", "a[href*='mailto']",
+                    ]
+                    for sel in content_selectors:
+                        try:
+                            await page.wait_for_selector(sel, timeout=5_000)
+                            break
+                        except Exception:
+                            continue
+                    else:
+                        # No content selector matched — try networkidle + extra time
+                        with contextlib.suppress(Exception):
+                            await page.wait_for_load_state("networkidle", timeout=8_000)
+                        await asyncio.sleep(3)
+                    await asyncio.sleep(2)
+                    html = await page.content()
+                    # Check if blocked (403, cloudflare challenge)
+                    title = await page.title()
+                    is_blocked = (
+                        len(html) < 1000
+                        or "403" in title
+                        or "Forbidden" in title
+                        or "Just a moment" in title
+                        or "cf-browser-verification" in html[:2000]
+                    )
+                    if is_blocked and attempt == 0:
+                        continue  # retry with headful
+                    return html
+                finally:
+                    await browser.close()
+        except Exception:
+            if attempt == 0 and config.scraping.headless:
+                continue  # retry with headful
     return None
 
 

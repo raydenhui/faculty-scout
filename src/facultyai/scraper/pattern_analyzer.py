@@ -139,12 +139,12 @@ Cloudflare challenge, redirect, empty page, or any page without faculty informat
 set "error" to a short description and leave records empty.
 Otherwise, omit the "error" field.
 
-If the listing has multiple pages, look for a "next page" link (e.g., ">" , "Next",
-"page=2", "/page/2/"). If the page uses alphabetical (A-Z) or numbered pagination,
-detect the pattern from previously visited pages. If the next page link is not
-directly visible in the HTML but can be INFERRED from the pattern, construct it.
+If the listing has multiple pages, look for a visible "next page" link in the HTML
+(e.g., ">" , "Next", "page=2", "/page/2/"). Only set next_page_url if an actual
+clickable link to the next page exists in the HTML. Do NOT guess or construct a
+next page URL from patterns or alphabet letters. If no visible next page link
+exists, set next_page_url to "".
 Set "next_page_url" to the full URL of the next page.
-If there is no next page, set it to empty string "".
 
 {{
   "static_values": {{"field_6": "Department of Computer Science"}},

@@ -64,13 +64,17 @@ async def scrape(
 
         # Follow next page
         visited_pages.append(current_url)
-        current_url = analysis.next_page_url.strip() if analysis.next_page_url else ""
-        if current_url:
+        raw_next = (analysis.next_page_url or "").strip()
+        # Validate: must be a different absolute URL (not a guessed suffix)
+        if raw_next and raw_next.startswith("http") and raw_next != current_url:
+            current_url = raw_next
             _update_progress(progress_callback, 30, f"Fetching page {page_num + 1}...")
             current_html = await _fetch_one_url(current_url, config)
             if not current_html:
                 log.info("scrape next page fetch failed: %s", current_url)
                 break
+        else:
+            current_url = ""  # No valid next page → exit loop
 
     if not all_records:
         return []

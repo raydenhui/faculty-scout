@@ -11,6 +11,8 @@ Playwright is used as a fallback when a page requires JavaScript rendering.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import re
 from typing import Any, TypedDict
@@ -439,7 +441,7 @@ def _fetch_page_node(
 
         log.info("fetch_page start url=%s", url)
         html = await _http_fetch(url, config)
-        if html and _has_content(html):
+        if html and _has_content(html) and not _is_js_template(html):
             log.debug("fetch_page http OK len=%d", len(html))
             cache.set_url_content(url, html, ttl_sec=config.files.cache_ttl_url)
             state["page_html"] = html
@@ -476,21 +478,66 @@ async def _http_fetch(url: str, config: AppConfig) -> str | None:
 
 
 async def _playwright_fetch(url: str, config: AppConfig) -> str | None:
-    try:
-        from playwright.async_api import async_playwright
+    for attempt in range(2):
+        headless = config.scraping.headless and attempt == 0
+        try:
+            from playwright.async_api import async_playwright
 
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=config.scraping.headless)
-            page = await browser.new_page()
-            try:
-                await page.goto(url, timeout=config.scraping.browser_timeout * 1000)
-                await page.wait_for_load_state("domcontentloaded")
-                html = await page.content()
-                return html
-            finally:
-                await browser.close()
-    except Exception:
-        pass
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(
+                    headless=headless,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                    ] if headless else [],
+                )
+                context = await browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/128.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1280, "height": 900},
+                    locale="en-US",
+                )
+                page = await context.new_page()
+                try:
+                    await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
+                                    wait_until="domcontentloaded")
+                    # Wait for JS-rendered content to appear
+                    content_selectors = [
+                        "tr[class]", "div[class*='people']", "div[class*='staff']",
+                        "div[class*='person']", "div[class*='profile']", ".member",
+                        "li[class]", "table[class]", "*[data-member]", "a[href*='mailto']",
+                    ]
+                    for sel in content_selectors:
+                        try:
+                            await page.wait_for_selector(sel, timeout=5_000)
+                            break
+                        except Exception:
+                            continue
+                    else:
+                        with contextlib.suppress(Exception):
+                            await page.wait_for_load_state("networkidle", timeout=8_000)
+                        await asyncio.sleep(3)
+                    await asyncio.sleep(2)
+                    html = await page.content()
+                    title = await page.title()
+                    is_blocked = (
+                        len(html) < 1000
+                        or "403" in title
+                        or "Forbidden" in title
+                        or "Just a moment" in title
+                        or "cf-browser-verification" in html[:2000]
+                    )
+                    if is_blocked and attempt == 0:
+                        continue
+                    return html
+                finally:
+                    await browser.close()
+        except Exception:
+            if attempt == 0 and config.scraping.headless:
+                continue
     return None
 
 
@@ -498,6 +545,59 @@ def _has_content(html: str) -> bool:
     """Crude check: does the HTML contain enough text to be a listing page?"""
     text = re.sub(r"<[^>]+>", " ", html)
     return len(text.strip()) > 200
+
+
+def _is_js_template(html: str) -> bool:
+    """Detect JS framework template HTML (Angular/Vue/React) that needs rendering."""
+    indicators = [
+        "{{",                       # Angular/Handlebars/Mustache
+        "v-bind", "v-if", "v-for", "v-model",  # Vue.js directives
+        "ng-app", "ng-controller", "ng-repeat", # AngularJS
+        '__vue__', '__vue_app__',               # Vue runtime
+        '_reactRootContainer',                  # React
+        'data-reactroot', 'data-reactid',       # React (legacy)
+        "<div id=\"root\">", "<div id=\"app\">" # Common SPAs
+    ]
+    snippet = html[:50_000]
+    for ind in indicators:
+        if ind in snippet:
+            return True
+
+    # Dynamic data loading: scripts contain AJAX/API/fetch calls for data
+    scripts = re.findall(r"<script[^>]*>.*?</script>", snippet, re.DOTALL | re.IGNORECASE)
+    api_patterns = ["/api/", "fetch(", "ajax(", "xmlhttp", "staff_data", "faculty_data",
+                    "person_data", "load_people", "get_people", "member_data"]
+    for s in scripts:
+        for pat in api_patterns:
+            if pat.lower() in s.lower():
+                return True
+
+    # Content check: pages with faculty words but no structured person data
+    text = re.sub(r"<[^>]+>", " ", snippet)
+    has_faculty_words = any(t in text.lower() for t in ["professor", "associate", "lecturer",
+                                                         "faculty", "academic staff", "teaching staff",
+                                                         "staff directory"])
+
+    # Look for structured person data in HTML (tables, lists of people)
+    has_person_table = bool(re.search(
+        r'<table[^>]*>.*?'                                      # table
+        r'<t[rd][^>]*>\s*(?:Prof\.|Dr\.|Professor)\s+[A-Z]'
+        r'.*?</table>',
+        snippet, re.DOTALL | re.IGNORECASE
+    ))
+    has_person_list = bool(re.search(
+        r'<li[^>]*>\s*(?:Prof\.|Dr\.|Professor)\s*[A-Z]',
+        snippet, re.IGNORECASE
+    ))
+    email_count = len(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", snippet)))
+
+    return bool(
+        has_faculty_words
+        and not has_person_table
+        and not has_person_list
+        and email_count < 3
+        and len(snippet) > 15000
+    )
 
 
 def _run_scraper_node(
