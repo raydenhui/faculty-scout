@@ -3,6 +3,7 @@
 For each record with missing fields (empty string is valid data; None/null
 means truly not found), fetches the profile page and asks the LLM to extract
 only the missing fields. Tracks failures in a "Remark" column.
+Uses a shared browser instance across all fetches for performance.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ _llm_log = get_llm_logger()
 MAX_CONCURRENT = 3
 
 _JSON_OBJ_RE = re.compile(r"\{[\s\S]*\}", re.MULTILINE)
+_BLOCKED_TITLE_RE = re.compile(r"403|forbidden|just a moment", re.IGNORECASE)
 
 
 async def visit_detail_pages(
@@ -40,11 +42,10 @@ async def visit_detail_pages(
     progress_callback: Any = None,
 ) -> list[dict[str, str]]:
     """LLM-only detail page extraction. None for truly unfound fields."""
-
     # Collect detail URLs from records' profile_url field
     detail_urls: list[tuple[int, str]] = []
     for idx, rec in enumerate(records):
-        pu = rec.get("profile_url") or rec.get("Profile URL") or ""
+        pu = _get_profile_url(rec)
         if pu and pu.startswith("http"):
             detail_urls.append((idx, pu))
 
@@ -61,31 +62,48 @@ async def visit_detail_pages(
 
     # Also include empty-string fields so LLM can fill them if data is found
     all_empty = _all_empty_fields(records, field_names)
-    log.info("visit_detail_pages null fields: %s, all empty: %s", missing_fields, all_empty)
-    extract_fields = list(set(missing_fields) | set(all_empty))
+    # Preserve schema order (non-deterministic set() fixed)
+    extract_fields = [f for f in field_names if f in set(missing_fields) | set(all_empty)]
+    log.info("visit_detail_pages extracting fields: %s", extract_fields)
 
-    log.info("visit_detail_pages missing fields: %s", missing_fields)
-
-    # Process ALL detail pages concurrently (with concurrency limit)
     to_process = detail_urls
     log.info("visit_detail_pages processing %d detail pages", len(to_process))
 
     total_errors = 0
     error_lock = asyncio.Lock()
+    abort_event = asyncio.Event()  # Fix #1: hard stop via event
     sem = asyncio.Semaphore(MAX_CONCURRENT)
+
+    # Fix #9: Shared browser for the entire batch
+    shared_browser: Any = None
+
+    async def _get_browser() -> Any:
+        nonlocal shared_browser
+        if shared_browser is None:
+            from playwright.async_api import async_playwright
+            pw = await async_playwright().__aenter__()
+            shared_browser = await pw.chromium.launch(
+                headless=config.scraping.headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                ] if config.scraping.headless else [],
+            )
+        return shared_browser
 
     async def _process(idx: int, url: str) -> bool | None:
         """True=data found, False=no data (page ok), None=error page."""
         nonlocal total_errors
         async with sem:
-            async with error_lock:
-                if total_errors >= 5:
-                    return None
-            html = await _fetch_one_url(url, config)
-            if not html or len(html) < 500:
+            if abort_event.is_set():
+                return None
+            html = await _fetch_one_url(url, config, _get_browser)
+            if _is_blocked_html(html):  # Fix #4: validate before accepting
                 _add_remark(records[idx], f"Detail page unreachable: {url}")
                 async with error_lock:
                     total_errors += 1
+                    if total_errors >= 5:
+                        abort_event.set()
                 return None
 
             result = await _llm_extract_detail(clean_html(html), extract_fields, schema, url, llm)
@@ -93,6 +111,8 @@ async def visit_detail_pages(
                 _add_remark(records[idx], f"LLM extraction failed for: {url}")
                 async with error_lock:
                     total_errors += 1
+                    if total_errors >= 5:
+                        abort_event.set()
                 return None
 
             found_any = False
@@ -100,23 +120,35 @@ async def visit_detail_pages(
                 if value is None:
                     pass
                 elif field_name in records[idx] and records[idx].get(field_name) in (None, "") and value:
-                    records[idx][field_name] = str(value)
+                    records[idx][field_name] = _coerce_value(value)  # Fix #6
                     found_any = True
             return found_any
 
-    tasks = [_process(idx, url) for idx, url in to_process]
-    results = await asyncio.gather(*tasks)
+    try:
+        tasks = [_process(idx, url) for idx, url in to_process]
+        results = await asyncio.gather(*tasks)
+    finally:
+        if shared_browser is not None:
+            with contextlib.suppress(Exception):
+                await shared_browser.close()
 
     if total_errors >= 5:
         log.warning("visit_detail_pages abandoned after %d+ error pages", total_errors)
-        _add_remark(records[0], f"Abandoned after {total_errors}+ error pages")
+        # Fix #2: no longer writes remark to records[0]
 
-    if progress_callback:
+    # Fix #3: guard division with max()
+    if progress_callback and to_process:
         completed = sum(1 for r in results if r is True)
-        pct = 50 + int(50 * (len(to_process) - total_errors) / len(to_process))
+        denom = max(len(to_process), 1)
+        pct = 50 + int(50 * (len(to_process) - min(total_errors, len(to_process))) / denom)
         progress_callback(pct, f"Profile pages: {completed}/{len(to_process)}")
 
     return records
+
+
+# ---------------------------------------------------------------------------
+# Detail extraction
+# ---------------------------------------------------------------------------
 
 
 async def _llm_extract_detail(
@@ -187,11 +219,16 @@ HTML:
             if data.get("error"):
                 log.info("_llm_extract_detail LLM reported error for %s: %s", url, data["error"])
                 return None
-            return {k: (None if v is None else str(v)) for k, v in data.items() if k != "error"}
+            return {k: (None if v is None else _coerce_value(v)) for k, v in data.items() if k != "error"}
     except json.JSONDecodeError:
         log.warning("_llm_extract_detail invalid JSON for %s", url)
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _find_missing_fields(records: list[dict[str, str]], field_names: list[str]) -> list[str]:
@@ -226,9 +263,43 @@ def _add_remark(record: dict[str, str], message: str) -> None:
         record["Remark"] = message
 
 
-async def _fetch_one_url(url: str, config: AppConfig) -> str | None:
-    html = await _playwright_fetch(url, config)
-    if html:
+def _coerce_value(value: Any) -> str:
+    """Convert LLM-extracted value to string, handling lists/dicts sensibly (Fix #6)."""
+    if isinstance(value, list):
+        return "; ".join(str(v) for v in value if v)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value) if value is not None else ""
+
+
+def _get_profile_url(record: dict[str, str]) -> str | None:
+    """Find a profile URL in a record with case-insensitive key matching (Fix #8)."""
+    for key, val in record.items():
+        if (
+            key.lower().replace(" ", "_") in ("profile_url",)
+            and val and isinstance(val, str) and val.startswith("http")
+        ):
+            return val
+    return None
+
+
+def _is_blocked_html(html: str | None) -> bool:
+    """Check if HTML looks like a block/challenge/error page (Fix #4 + #11)."""
+    if html is None:
+        return True
+    if len(html) < 1000:
+        return True
+    if _BLOCKED_TITLE_RE.search(html[:2000]):
+        return True
+    return "cf-browser-verification" in html[:2000]
+
+
+async def _fetch_one_url(
+    url: str, config: AppConfig, browser_factory: Any = None,
+) -> str | None:
+    # Fix #4: validate Playwright result before returning; fall through to aiohttp if blocked
+    html = await _playwright_fetch(url, config, browser_factory)
+    if html and not _is_blocked_html(html):
         return html
     try:
         import aiohttp
@@ -242,12 +313,22 @@ async def _fetch_one_url(url: str, config: AppConfig) -> str | None:
     return None
 
 
-async def _playwright_fetch(url: str, config: AppConfig) -> str | None:
+async def _playwright_fetch(
+    url: str, config: AppConfig, get_browser: Any = None,
+) -> str | None:
+    # Fix #9: optionally receives a shared browser factory; creates pages, not new browsers
     for attempt in range(2):
         headless = config.scraping.headless and attempt == 0
         try:
-            from playwright.async_api import async_playwright
-            async with async_playwright() as pw:
+            if get_browser is not None:
+                browser = await get_browser()
+                if headless != config.scraping.headless:
+                    with contextlib.suppress(Exception):
+                        await browser.close()
+                    browser = None
+            if get_browser is None or browser is None:
+                from playwright.async_api import async_playwright
+                pw = await async_playwright().__aenter__()
                 browser = await pw.chromium.launch(
                     headless=headless,
                     args=[
@@ -255,55 +336,49 @@ async def _playwright_fetch(url: str, config: AppConfig) -> str | None:
                         "--no-sandbox",
                     ] if headless else [],
                 )
-                context = await browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/128.0.0.0 Safari/537.36"
-                    ),
-                    viewport={"width": 1280, "height": 900},
-                    locale="en-US",
-                )
-                page = await context.new_page()
-                try:
-                    await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
-                                    wait_until="domcontentloaded")
-                    # Wait for JS-rendered content to appear
-                    content_selectors = [
-                        "tr[class]", "div[class*='people']", "div[class*='staff']",
-                        "div[class*='person']", "div[class*='profile']", ".member",
-                        "li[class]", "table[class]", "*[data-member]", "a[href*='mailto']",
-                    ]
-                    for sel in content_selectors:
-                        try:
-                            await page.wait_for_selector(sel, timeout=5_000)
-                            break
-                        except Exception:
-                            continue
-                    else:
-                        # No content selector matched — try networkidle + extra time
-                        with contextlib.suppress(Exception):
-                            await page.wait_for_load_state("networkidle", timeout=8_000)
-                        await asyncio.sleep(3)
-                    await asyncio.sleep(2)
-                    html = await page.content()
-                    # Check if blocked (403, cloudflare challenge)
-                    title = await page.title()
-                    is_blocked = (
-                        len(html) < 1000
-                        or "403" in title
-                        or "Forbidden" in title
-                        or "Just a moment" in title
-                        or "cf-browser-verification" in html[:2000]
-                    )
-                    if is_blocked and attempt == 0:
-                        continue  # retry with headful
+
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/128.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 900},
+                locale="en-US",
+            )
+            page = await context.new_page()
+            try:
+                await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
+                                wait_until="domcontentloaded")
+                content_selectors = [
+                    "tr[class]", "div[class*='people']", "div[class*='staff']",
+                    "div[class*='person']", "div[class*='profile']", ".member",
+                    "li[class]", "table[class]", "*[data-member]", "a[href*='mailto']",
+                ]
+                for sel in content_selectors:
+                    try:
+                        await page.wait_for_selector(sel, timeout=5_000)
+                        break
+                    except Exception:
+                        continue
+                else:
+                    with contextlib.suppress(Exception):
+                        await page.wait_for_load_state("networkidle", timeout=8_000)
+                    await asyncio.sleep(3)
+                await asyncio.sleep(2)
+                html = await page.content()
+                if not _is_blocked_html(html):
                     return html
-                finally:
+                if attempt == 0 and headless:
+                    continue
+                return None
+            finally:
+                await context.close()
+                if get_browser is None:
                     await browser.close()
         except Exception:
             if attempt == 0 and config.scraping.headless:
-                continue  # retry with headful
+                continue
     return None
 
 

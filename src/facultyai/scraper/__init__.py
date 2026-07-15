@@ -29,30 +29,40 @@ async def scrape(
     config: AppConfig,
     progress_callback: Any = None,
 ) -> list[dict[str, Any]]:
-    """Extract faculty records from all listing pages (with pagination).
+    """Extract faculty records from all listing pages using DFS traversal.
 
-    1. LLM analyzes listing page → records + next_page_url
-    2. Follow next page links up to MAX_PAGES
+    1. LLM analyzes listing page → records + child_page_urls
+    2. DFS stack-based traversal of child pages up to MAX_PAGES
     3. Combine all records, visit profile pages for missing fields
     """
     field_names = [c.name for c in schema.extracted_columns()]
     all_records: list[dict[str, Any]] = []
-    current_url = url
-    current_html = html
+    visited_urls: set[str] = set()
+    visited_list: list[str] = []
     page_num = 0
-    visited_pages: list[str] = []
 
-    while current_url and page_num < MAX_PAGES:
+    # DFS stack: each entry is (url, html) to process
+    stack: list[tuple[str, str]] = [(url, html)]
+
+    while stack and page_num < MAX_PAGES:
+        current_url, current_html = stack.pop()
+        if current_url in visited_urls:
+            continue
+
         page_num += 1
-        log.info("scrape page %d url=%s html_len=%d", page_num, current_url, len(current_html))
+        visited_urls.add(current_url)
+        visited_list.append(current_url)
+
+        log.info("scrape page %d url=%s html_len=%d stack=%d",
+                 page_num, current_url, len(current_html), len(stack))
         _update_progress(progress_callback, min(5 + page_num * 5, 30),
                          f"Analyzing page {page_num}...")
 
         analysis = await analyze_listing_page(llm, current_html, schema, current_url,
-                                              visited_pages=visited_pages if page_num > 1 else None)
+                                              visited_pages=visited_list if page_num > 1 else None)
         if analysis is None:
             log.error("scrape listing analysis failed on page %d", page_num)
-            break
+            continue
 
         if analysis.page_error:
             log.warning("scrape page error: %s", analysis.page_error)
@@ -62,19 +72,26 @@ async def scrape(
         all_records.extend(records)
         log.info("scrape page %d: %d records (total: %d)", page_num, len(records), len(all_records))
 
-        # Follow next page
-        visited_pages.append(current_url)
+        # Collect child pages for DFS traversal
+        child_urls: list[str] = list(analysis.child_page_urls)
         raw_next = (analysis.next_page_url or "").strip()
-        # Validate: must be a different absolute URL (not a guessed suffix)
-        if raw_next and raw_next.startswith("http") and raw_next != current_url:
-            current_url = raw_next
-            _update_progress(progress_callback, 30, f"Fetching page {page_num + 1}...")
-            current_html = await _fetch_one_url(current_url, config)
-            if not current_html:
-                log.info("scrape next page fetch failed: %s", current_url)
-                break
-        else:
-            current_url = ""  # No valid next page → exit loop
+        if raw_next and raw_next.startswith("http") and raw_next not in visited_urls:
+            child_urls.append(raw_next)
+
+        # Deduplicate and filter already-visited URLs
+        new_children: list[str] = []
+        for child_url in child_urls:
+            child_url = child_url.strip()
+            if child_url and child_url.startswith("http") and child_url not in visited_urls:
+                new_children.append(child_url)
+
+        # DFS: push children in reverse order so the first child is processed next
+        for child_url in reversed(new_children):
+            child_html = await _fetch_one_url(child_url, config)
+            if child_html:
+                stack.append((child_url, child_html))
+            else:
+                log.info("scrape child page fetch failed: %s", child_url)
 
     if not all_records:
         return []

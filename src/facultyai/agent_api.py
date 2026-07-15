@@ -161,6 +161,7 @@ async def add_target(
 async def run(
     config_path: str = "config.yaml",
     retry_failed: bool = False,
+    skip_unchanged: bool = False,
 ) -> dict[str, Any]:
     """Run the full scrape pipeline. Returns per-job results + summary."""
     cfg = load_config(config_path)
@@ -178,7 +179,8 @@ async def run(
                 from .orchestrator import run_pipeline
 
                 summary = await run_pipeline(
-                    cfg, schema, db, cache, retry_failed=retry_failed
+                    cfg, schema, db, cache, retry_failed=retry_failed,
+                    skip_unchanged=skip_unchanged,
                 )
                 jobs = await db.list_jobs()
                 return ok({

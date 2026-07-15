@@ -51,6 +51,8 @@ class AgentState(TypedDict, total=False):
     error: str | None
     discovered_departments: list[str]
     need_discovery: bool
+    skip_unchanged: bool
+    skipped: bool
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +66,7 @@ def build_agent_graph(
     llm: BaseChatModel,
     cache: CacheManager,
     checkpointer: BaseCheckpointSaver | None = None,
+    skip_unchanged: bool = False,
 ):
     """Create the compiled LangGraph state graph for scraping."""
 
@@ -71,7 +74,7 @@ def build_agent_graph(
 
     graph.add_node("discover_departments", _discover_departments_node(config, llm, cache))
     graph.add_node("discover_url", _discover_url_node(config, llm, cache))
-    graph.add_node("fetch_page", _fetch_page_node(config, cache))
+    graph.add_node("fetch_page", _fetch_page_node(config, cache, skip_unchanged=skip_unchanged))
     graph.add_node("run_scraper", _run_scraper_node(config, schema, llm, cache))
     graph.add_node("validate_and_finalize", _validate_and_finalize_node(config, schema))
 
@@ -422,8 +425,14 @@ def _filter_bad_urls(results: list[dict]) -> list[dict]:
 def _fetch_page_node(
     config: AppConfig,
     cache: CacheManager,
+    skip_unchanged: bool = False,
 ):
-    """Fetch page HTML, using cache and Playwright fallback for JS pages."""
+    """Fetch page HTML, using cache and Playwright fallback for JS pages.
+
+    When *skip_unchanged* is True, always re-fetches the page and compares
+    with the cached version.  If the content is unchanged the node sets
+    ``state["skipped"] = True`` so downstream nodes can short-circuit.
+    """
 
     async def _node(state: AgentState) -> AgentState:
         url = state.get("listing_url")
@@ -433,30 +442,45 @@ def _fetch_page_node(
                 state["error"] = "No URL to fetch."
             return state
 
+        state_skip = state.get("skip_unchanged", False)
         cached = cache.get_url_content(url)
-        if cached:
+
+        # ---- normal (non-skip) path: use cache if available ---------------
+        if not (skip_unchanged or state_skip) and cached:
             log.debug("fetch_page cache HIT url=%s len=%d", url, len(cached))
             state["page_html"] = cached
             return state
 
-        log.info("fetch_page start url=%s", url)
+        # ---- always re-fetch when skip_unchanged is enabled ---------------
+        log.info("fetch_page start url=%s skip_mode=%s", url, skip_unchanged or state_skip)
         html = await _http_fetch(url, config)
         if html and _has_content(html) and not _is_js_template(html):
             log.debug("fetch_page http OK len=%d", len(html))
+        else:
+            log.info("fetch_page trying Playwright fallback...")
+            html = await _playwright_fetch(url, config)
+
+        if not html:
+            log.warning("fetch_page FAILED url=%s", url)
+            # Fall back to cached version if available
+            if cached:
+                state["page_html"] = cached
+            else:
+                state["page_html"] = None
+            return state
+
+        # ---- comparison logic for skip_unchanged --------------------------
+        if (skip_unchanged or state_skip) and cached and cached == html:
+            log.info("fetch_page SKIPPED url=%s (content unchanged, len=%d)", url, len(html))
             cache.set_url_content(url, html, ttl_sec=config.files.cache_ttl_url)
+            state["skipped"] = True
             state["page_html"] = html
             return state
 
-        log.info("fetch_page trying Playwright fallback...")
-        html = await _playwright_fetch(url, config)
-        if html:
-            log.debug("fetch_page playwright OK len=%d", len(html))
-            cache.set_url_content(url, html, ttl_sec=config.files.cache_ttl_url)
-            state["page_html"] = html
-            return state
-
-        log.warning("fetch_page FAILED url=%s", url)
-        state["page_html"] = None
+        # ---- new content, or normal mode: cache and proceed ----------------
+        log.debug("fetch_page OK len=%d", len(html))
+        cache.set_url_content(url, html, ttl_sec=config.files.cache_ttl_url)
+        state["page_html"] = html
         return state
 
     return _node
@@ -620,6 +644,10 @@ async def _run_scraper_impl(
     cache: CacheManager,
     progress_callback: Any = None,
 ) -> AgentState:
+    if state.get("skipped"):
+        log.info("run_scraper: skipped due to unchanged content")
+        return state
+
     url = state.get("listing_url")
     if not url:
         log.warning("run_scraper: no listing_url, skipping")

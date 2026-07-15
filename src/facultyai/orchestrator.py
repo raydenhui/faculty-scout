@@ -30,11 +30,13 @@ async def run_pipeline(
     db: Database,
     cache: CacheManager,
     retry_failed: bool = False,
+    skip_unchanged: bool = False,
 ) -> dict[str, Any]:
     """Run all pending jobs and export results. Returns run summary dict."""
     llm = get_llm(config.llm)
     console = Console()
-    log.info("pipeline start  provider=%s model=%s", config.llm.provider, config.llm.model)
+    log.info("pipeline start  provider=%s model=%s skip_unchanged=%s",
+             config.llm.provider, config.llm.model, skip_unchanged)
 
     console.print("[bold blue]Orchestrator[/] Loading input from Excel...")
     inserted, deleted = await sync_input_excel(db, config.files.input_excel)
@@ -58,7 +60,8 @@ async def run_pipeline(
     scrape_jobs = 0
 
     async with AsyncSqliteSaver.from_conn_string(str(db.db_path)) as checkpointer:
-        agent = build_agent_graph(config, schema, llm, cache, checkpointer=checkpointer)
+        agent = build_agent_graph(config, schema, llm, cache, checkpointer=checkpointer,
+                                  skip_unchanged=skip_unchanged)
 
         for r in uni_rows:
             uni = r["university"]
@@ -70,7 +73,7 @@ async def run_pipeline(
             # Skip rows already marked complete in Excel
             excel_status = r.get("status")
             log.debug("status check uni=%s dept=%s raw_status=%s", uni, dept, repr(excel_status))
-            if excel_status and str(excel_status).strip().lower() not in ("", "none", "null", "nan"):
+            if excel_status and str(excel_status).strip().lower() not in ("", "none", "null", "nan", "skipped"):
                 console.print(
                     f"  [dim]Skipping[/] {uni}/{dept or 'All'}: "
                     "already completed (clear status to re-run)"
@@ -155,6 +158,7 @@ async def run_pipeline(
         semaphore = asyncio.Semaphore(config.scraping.max_concurrent_jobs)
         successful = 0
         failed = 0
+        skipped = 0
 
         if scrape_pending:
             with Progress(
@@ -168,7 +172,7 @@ async def run_pipeline(
                 task = progress.add_task("[blue]Scraping...", total=len(scrape_pending))
 
                 async def _process_job(job: dict[str, Any]) -> None:
-                    nonlocal successful, failed
+                    nonlocal successful, failed, skipped
                     async with semaphore:
                         jid = job["job_id"]
                         await db.update_job_status(jid, "running")
@@ -179,6 +183,7 @@ async def run_pipeline(
                                 "department": job.get("department"),
                                 "need_discovery": False,
                                 "listing_url": job.get("listing_url"),
+                                "skip_unchanged": skip_unchanged,
                             }
 
                             # Set progress callback via module-level variable (not serializable)
@@ -195,6 +200,23 @@ async def run_pipeline(
                             )
 
                             scraper_graph._progress_callback = None
+
+                            if result.get("skipped"):
+                                progress.console.print(
+                                    f"[dim]Skipped[/] {job['university']}/"
+                                    f"{job.get('department', 'All')}: page unchanged"
+                                )
+                                await db.update_job_status(jid, "completed")
+                                _set_excel_status(
+                                    config.files.input_excel,
+                                    job["university"],
+                                    job.get("department"),
+                                    "Skipped",
+                                    link=result.get("listing_url") or "",
+                                )
+                                skipped += 1
+                                progress.update(task, advance=1)
+                                return
 
                             listing_url = result.get("listing_url")
                             if listing_url:
@@ -310,7 +332,7 @@ async def run_pipeline(
         total = discovery_jobs + scrape_jobs
         await db.finish_run(run_id, total, successful, failed)
 
-        return {"total": total, "successful": successful, "failed": failed}
+        return {"total": total, "successful": successful, "failed": failed, "skipped": skipped}
 
 
 def _build_record_id(university: str, department: str | None, unique_vals: dict[str, Any]) -> str:

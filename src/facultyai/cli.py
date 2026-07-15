@@ -44,27 +44,31 @@ def cli() -> None:
 @cli.command()
 @click.option("--config-path", default="config.yaml", help="Path to config file.")
 @click.option("--retry-failed", is_flag=True, default=False, help="Retry previously failed jobs.")
+@click.option("--skip-unchanged", is_flag=True, default=False,
+              help="Skip jobs where listing page HTML is unchanged from last run.")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show info-level logs.")
 @click.option("--debug", is_flag=True, default=False, help="Show debug-level logs (implies -v).")
 @click.option("--json", "json_out", is_flag=True, default=False, help="Emit machine-readable JSON to stdout.")
-def run(config_path: str, retry_failed: bool, verbose: bool, debug: bool, json_out: bool) -> None:
+def run(config_path: str, retry_failed: bool, skip_unchanged: bool, verbose: bool, debug: bool, json_out: bool) -> None:
     """Start/run all pending jobs."""
     configure_logging(verbose=verbose, debug=debug)
     if json_out:
         from .agent_api import run as api_run
 
-        result = _run_async(api_run(config_path, retry_failed=retry_failed))
+        result = _run_async(api_run(config_path, retry_failed=retry_failed, skip_unchanged=skip_unchanged))
         _emit_json(result)
         return
-    _run_with_lock(config_path, retry_failed=retry_failed)
+    _run_with_lock(config_path, retry_failed=retry_failed, skip_unchanged=skip_unchanged)
 
 
 @cli.command()
 @click.option("--config-path", default="config.yaml", help="Path to config file.")
 @click.option("--retry-failed", is_flag=True, default=False, help="Also retry previously failed jobs.")
+@click.option("--skip-unchanged", is_flag=True, default=False,
+              help="Skip jobs where listing page HTML is unchanged from last run.")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show info-level logs.")
 @click.option("--debug", is_flag=True, default=False, help="Show debug-level logs (implies -v).")
-def resume(config_path: str, retry_failed: bool, verbose: bool, debug: bool) -> None:
+def resume(config_path: str, retry_failed: bool, skip_unchanged: bool, verbose: bool, debug: bool) -> None:
     """Resume incomplete jobs (resets running jobs, optionally retries failed)."""
     configure_logging(verbose=verbose, debug=debug)
     cfg = load_config(config_path)
@@ -94,7 +98,9 @@ def resume(config_path: str, retry_failed: bool, verbose: bool, debug: bool) -> 
 
                     from .orchestrator import run_pipeline
 
-                    summary = await run_pipeline(cfg, schema, db, cache, retry_failed=retry_failed)
+                    summary = await run_pipeline(cfg, schema, db, cache,
+                                                 retry_failed=retry_failed,
+                                                 skip_unchanged=skip_unchanged)
                     if summary["failed"] > 0:
                         sys.exit(1)
                 finally:
@@ -501,7 +507,7 @@ def config_show(path: str) -> None:
     console.print_json(json.dumps(mask_secrets(cfg)))
 
 
-def _run_with_lock(config_path: str, retry_failed: bool = False) -> None:
+def _run_with_lock(config_path: str, retry_failed: bool = False, skip_unchanged: bool = False) -> None:
     cfg = load_config(config_path)
     lock = LockManager()
 
@@ -521,7 +527,8 @@ def _run_with_lock(config_path: str, retry_failed: bool = False) -> None:
                     from .orchestrator import run_pipeline
 
                     summary = await run_pipeline(
-                        cfg, schema, db, cache, retry_failed=retry_failed
+                        cfg, schema, db, cache, retry_failed=retry_failed,
+                        skip_unchanged=skip_unchanged,
                     )
                     if summary["failed"] > 0:
                         sys.exit(1)

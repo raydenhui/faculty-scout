@@ -69,6 +69,7 @@ class ListingAnalysis:
         self._direct_records: list[dict[str, Any]] = raw.get("_direct_records", [])
         self.page_error: str = raw.get("page_error", "")
         self.next_page_url: str = raw.get("next_page_url", "")
+        self.child_page_urls: list[str] = raw.get("child_page_urls", [])
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -77,6 +78,7 @@ class ListingAnalysis:
             "_direct_records": self._direct_records,
             "page_error": self.page_error,
             "next_page_url": self.next_page_url,
+            "child_page_urls": self.child_page_urls,
         }
 
 
@@ -139,12 +141,21 @@ Cloudflare challenge, redirect, empty page, or any page without faculty informat
 set "error" to a short description and leave records empty.
 Otherwise, omit the "error" field.
 
-If the listing has multiple pages, look for a visible "next page" link in the HTML
-(e.g., ">" , "Next", "page=2", "/page/2/"). Only set next_page_url if an actual
-clickable link to the next page exists in the HTML. Do NOT guess or construct a
-next page URL from patterns or alphabet letters. If no visible next page link
-exists, set next_page_url to "".
-Set "next_page_url" to the full URL of the next page.
+If the listing spans multiple sub-pages, identify ALL child page URLs visible
+in the HTML. These can be:
+- Paginated pages (e.g., page=2, page=3, /page/2/, /page/3/)
+- Alphabetical index pages (e.g., /faculty/A/, /faculty/B/, /faculty/C/)
+- Department/category sub-pages (e.g., /cs/faculty, /math/faculty)
+- Any other grouping links that lead to more faculty listings
+
+Look for actual clickable links in the HTML. Do NOT guess or construct URLs
+from patterns — only include URLs that have visible anchor tags in the HTML.
+
+If the listing has a single linear "next page" progression, include only the
+next page URL in the array. If there are multiple sibling pages, include all
+of them.
+
+Set "child_page_urls" to an array of full URLs (empty array if no more pages).
 
 {{
   "static_values": {{"field_6": "Department of Computer Science"}},
@@ -155,7 +166,8 @@ Set "next_page_url" to the full URL of the next page.
     }}
   ],
   "error": null,
-  "next_page_url": "https://..." or ""
+  "next_page_url": "https://..." or "",
+  "child_page_urls": ["https://...", "https://..."]
 }}
 
 HTML:
@@ -187,11 +199,14 @@ HTML:
     static_values = _unmap_static_values(data.get("static_values", {}), fwd)
     llm_error = data.get("error")
     next_page_url = data.get("next_page_url", "")
+    child_page_urls = data.get("child_page_urls", [])
+    if not isinstance(child_page_urls, list):
+        child_page_urls = []
     if llm_error:
         log.warning("direct mode LLM reported error: %s", llm_error)
 
-    log.info("direct mode: %d records, %d static values, next_page=%s",
-             len(records), len(static_values), next_page_url or "(none)")
+    log.info("direct mode: %d records, %d static values, next_page=%s, child_pages=%d",
+             len(records), len(static_values), next_page_url or "(none)", len(child_page_urls))
 
     return ListingAnalysis({
         "static_values": static_values,
@@ -199,6 +214,7 @@ HTML:
         "_direct_records": records,
         "page_error": llm_error or "",
         "next_page_url": next_page_url or "",
+        "child_page_urls": child_page_urls,
     })
 
 
