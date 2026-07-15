@@ -390,6 +390,102 @@ def discover(config_path: str, verbose: bool, debug: bool, json_out: bool) -> No
 
 @cli.command()
 @click.option("--config-path", default="config.yaml", help="Path to config file.")
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Show info-level logs.")
+@click.option("--debug", is_flag=True, default=False, help="Show debug-level logs (implies -v).")
+@click.option("--json", "json_out", is_flag=True, default=False, help="Emit machine-readable JSON to stdout.")
+def url_only(config_path: str, verbose: bool, debug: bool, json_out: bool) -> None:
+    """Discover listing page URLs for department entries missing a link in the input Excel."""
+    configure_logging(verbose=verbose, debug=debug)
+    cfg = load_config(config_path)
+    lock = LockManager()
+
+    if not lock.acquire():
+        if json_out:
+            _emit_json({"success": False, "error": {"code": "LOCKED",
+                        "message": "Another facultyai process is already running."}})
+        console.print("[red]Another facultyai process is already running.[/]")
+        sys.exit(1)
+
+    try:
+
+        async def _run() -> dict:
+            db = Database(cfg.files.database)
+            load_schema(cfg.files.schema_file)
+            collected: list[dict] = []
+
+            def _p(*args, **kwargs):
+                if not json_out:
+                    console.print(*args, **kwargs)
+
+            async with db:
+                from .input_manager import sync_input_excel
+                from .llm_factory import get_llm
+
+                _p("[bold blue]URL Discovery[/] Loading input from Excel...")
+                inserted, deleted = await sync_input_excel(db, cfg.files.input_excel)
+                _p(f"  Input sync: {inserted} rows kept, {deleted} removed.")
+
+                all_rows = await db.get_input_universities()
+                to_process = []
+                for r in all_rows:
+                    dept = r.get("department")
+                    link = r.get("link")
+                    if dept and str(dept).strip().lower() not in ("", "none", "null", "nan"):
+                        raw_link = str(link).strip() if link else ""
+                        if raw_link.lower() in ("", "none", "null", "nan"):
+                            s = r.get("status")
+                            if s and str(s).strip().lower() not in ("", "none", "null", "nan"):
+                                _p(f"  [dim]Skipping[/] {r['university']}/{dept}: already completed")
+                            else:
+                                to_process.append(r)
+
+                if not to_process:
+                    _p("[yellow]No department entries missing a link to process.[/]")
+                    return {"results": collected}
+
+                _p(f"  Found {len(to_process)} department entries to discover URLs for.")
+
+                llm = get_llm(cfg.llm)
+
+                for r in to_process:
+                    uni = r["university"]
+                    dept = r["department"]
+                    _p(f"\n[cyan]Discovering URL for {uni} / {dept}...[/]")
+
+                    from .scraper_graph import _discover_url_impl
+
+                    state = {
+                        "university": uni,
+                        "department": dept,
+                        "listing_url": "",
+                    }
+                    result = await _discover_url_impl(state, cfg, llm, None)
+                    url = result.get("listing_url")
+                    error = result.get("error")
+
+                    if url and str(url).startswith("http"):
+                        _p(f"  [green]Found: {url}[/]")
+                        collected.append({"university": uni, "department": dept, "url": url})
+
+                        from .orchestrator import _set_excel_status
+
+                        _set_excel_status(cfg.files.input_excel, uni, dept, "url-found", link=url)
+                        _p(f"  [dim]Updated {cfg.files.input_excel} with URL[/]")
+                    else:
+                        _p(f"  [yellow]No URL found[/] {('— ' + error) if error else ''}")
+                        collected.append({"university": uni, "department": dept, "url": None, "error": error})
+
+            return {"results": collected}
+
+        data = _run_async(_run())
+        if json_out:
+            _emit_json({"success": True, "data": data})
+    finally:
+        lock.release()
+
+
+@cli.command()
+@click.option("--config-path", default="config.yaml", help="Path to config file.")
 @click.argument("university")
 @click.argument("department", required=False)
 @click.option("--link", default=None, help="Pre-filled listing URL for this target.")
