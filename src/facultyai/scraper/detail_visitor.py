@@ -76,13 +76,14 @@ async def visit_detail_pages(
 
     # Fix #9: Shared browser for the entire batch
     shared_browser: Any = None
+    shared_playwright: Any = None
 
     async def _get_browser() -> Any:
-        nonlocal shared_browser
+        nonlocal shared_browser, shared_playwright
         if shared_browser is None:
             from playwright.async_api import async_playwright
-            pw = await async_playwright().__aenter__()
-            shared_browser = await pw.chromium.launch(
+            shared_playwright = await async_playwright().__aenter__()
+            shared_browser = await shared_playwright.chromium.launch(
                 headless=config.scraping.headless,
                 args=[
                     "--disable-blink-features=AutomationControlled",
@@ -131,6 +132,9 @@ async def visit_detail_pages(
         if shared_browser is not None:
             with contextlib.suppress(Exception):
                 await shared_browser.close()
+        if shared_playwright is not None:
+            with contextlib.suppress(Exception):
+                await shared_playwright.__aexit__(None, None, None)
 
     if total_errors >= 5:
         log.warning("visit_detail_pages abandoned after %d+ error pages", total_errors)
@@ -319,6 +323,7 @@ async def _playwright_fetch(
     # Fix #9: optionally receives a shared browser factory; creates pages, not new browsers
     for attempt in range(2):
         headless = config.scraping.headless and attempt == 0
+        own_pw: Any = None
         try:
             if get_browser is not None:
                 browser = await get_browser()
@@ -328,8 +333,8 @@ async def _playwright_fetch(
                     browser = None
             if get_browser is None or browser is None:
                 from playwright.async_api import async_playwright
-                pw = await async_playwright().__aenter__()
-                browser = await pw.chromium.launch(
+                own_pw = await async_playwright().__aenter__()
+                browser = await own_pw.chromium.launch(
                     headless=headless,
                     args=[
                         "--disable-blink-features=AutomationControlled",
@@ -348,8 +353,16 @@ async def _playwright_fetch(
             )
             page = await context.new_page()
             try:
-                await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
-                                wait_until="domcontentloaded")
+                response = await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
+                                           wait_until="domcontentloaded")
+                http_status = response.status if response else 0
+                if http_status in (404, 410):
+                    log.debug("_playwright_fetch HTTP %d, skipping: %s", http_status, url)
+                    return None
+                if http_status >= 500:
+                    log.debug("_playwright_fetch HTTP %d server error, skipping: %s", http_status, url)
+                    return None
+
                 content_selectors = [
                     "tr[class]", "div[class*='people']", "div[class*='staff']",
                     "div[class*='person']", "div[class*='profile']", ".member",
@@ -376,9 +389,18 @@ async def _playwright_fetch(
                 await context.close()
                 if get_browser is None:
                     await browser.close()
+                    if own_pw is not None:
+                        with contextlib.suppress(Exception):
+                            await own_pw.__aexit__(None, None, None)
         except Exception:
             if attempt == 0 and config.scraping.headless:
+                if own_pw is not None:
+                    with contextlib.suppress(Exception):
+                        await own_pw.__aexit__(None, None, None)
                 continue
+            if own_pw is not None:
+                with contextlib.suppress(Exception):
+                    await own_pw.__aexit__(None, None, None)
     return None
 
 

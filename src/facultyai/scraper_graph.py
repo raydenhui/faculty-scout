@@ -445,6 +445,10 @@ def _fetch_page_node(
         state_skip = state.get("skip_unchanged", False)
         cached = cache.get_url_content(url)
 
+        # In skip mode the cache must survive between monthly runs →
+        # disable TTL expiry so the comparison always has a baseline.
+        cache_ttl = 0 if (skip_unchanged or state_skip) else config.files.cache_ttl_url
+
         # ---- normal (non-skip) path: use cache if available ---------------
         if not (skip_unchanged or state_skip) and cached:
             log.debug("fetch_page cache HIT url=%s len=%d", url, len(cached))
@@ -472,14 +476,14 @@ def _fetch_page_node(
         # ---- comparison logic for skip_unchanged --------------------------
         if (skip_unchanged or state_skip) and cached and cached == html:
             log.info("fetch_page SKIPPED url=%s (content unchanged, len=%d)", url, len(html))
-            cache.set_url_content(url, html, ttl_sec=config.files.cache_ttl_url)
+            cache.set_url_content(url, html, ttl_sec=cache_ttl)
             state["skipped"] = True
             state["page_html"] = html
             return state
 
         # ---- new content, or normal mode: cache and proceed ----------------
         log.debug("fetch_page OK len=%d", len(html))
-        cache.set_url_content(url, html, ttl_sec=config.files.cache_ttl_url)
+        cache.set_url_content(url, html, ttl_sec=cache_ttl)
         state["page_html"] = html
         return state
 
@@ -502,6 +506,7 @@ async def _http_fetch(url: str, config: AppConfig) -> str | None:
 
 
 async def _playwright_fetch(url: str, config: AppConfig) -> str | None:
+    """Fetch page with Playwright. Skips headful retry for 404/410/5xx status codes."""
     for attempt in range(2):
         headless = config.scraping.headless and attempt == 0
         try:
@@ -526,8 +531,16 @@ async def _playwright_fetch(url: str, config: AppConfig) -> str | None:
                 )
                 page = await context.new_page()
                 try:
-                    await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
-                                    wait_until="domcontentloaded")
+                    response = await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
+                                               wait_until="domcontentloaded")
+                    http_status = response.status if response else 0
+                    if http_status in (404, 410):
+                        log.debug("_playwright_fetch HTTP %d, skipping: %s", http_status, url)
+                        return None
+                    if http_status >= 500:
+                        log.debug("_playwright_fetch HTTP %d server error, skipping: %s", http_status, url)
+                        return None
+
                     # Wait for JS-rendered content to appear
                     content_selectors = [
                         "tr[class]", "div[class*='people']", "div[class*='staff']",

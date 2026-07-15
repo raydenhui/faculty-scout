@@ -68,7 +68,6 @@ class ListingAnalysis:
         self.has_detail_pages: bool = raw.get("has_detail_pages", True)
         self._direct_records: list[dict[str, Any]] = raw.get("_direct_records", [])
         self.page_error: str = raw.get("page_error", "")
-        self.next_page_url: str = raw.get("next_page_url", "")
         self.child_page_urls: list[str] = raw.get("child_page_urls", [])
 
     def to_dict(self) -> dict[str, Any]:
@@ -77,7 +76,6 @@ class ListingAnalysis:
             "has_detail_pages": self.has_detail_pages,
             "_direct_records": self._direct_records,
             "page_error": self.page_error,
-            "next_page_url": self.next_page_url,
             "child_page_urls": self.child_page_urls,
         }
 
@@ -87,7 +85,7 @@ async def analyze_listing_page(
     html: str,
     schema: Schema,
     url: str = "",
-    visited_pages: list[str] | None = None,
+    ancestor_urls: list[str] | None = None,
 ) -> ListingAnalysis | None:
     """Direct mode: LLM outputs all items with fields + profile links in one JSON."""
     field_list = _field_list_text(schema)
@@ -99,16 +97,16 @@ async def analyze_listing_page(
         for alias in sorted(fwd.keys(), key=lambda x: int(x.split("_")[1]))
     )
 
-    prev_text = ""
-    if visited_pages:
-        prev_text = "Previously visited pages:\n" + "\n".join(
-            f"  {i}. {u}" for i, u in enumerate(visited_pages, 1)
-        ) + "\n\n"
+    ancestor_text = ""
+    if ancestor_urls:
+        ancestor_text = "Ancestor pages (chain from root to this page, already visited):\n" + "\n".join(
+            f"  {i}. {u}" for i, u in enumerate(ancestor_urls, 1)
+        ) + "\n"
 
     prompt = f"""Extract ALL academic faculty members from this listing page HTML.
 
 URL: {url}
-{prev_text}Fields to extract per person (use the abstract field_* keys):
+{ancestor_text}Fields to extract per person (use the abstract field_* keys):
 {field_list}
 {static_info}
 
@@ -141,19 +139,32 @@ Cloudflare challenge, redirect, empty page, or any page without faculty informat
 set "error" to a short description and leave records empty.
 Otherwise, omit the "error" field.
 
-If the listing spans multiple sub-pages, identify ALL child page URLs visible
-in the HTML. These can be:
-- Paginated pages (e.g., page=2, page=3, /page/2/, /page/3/)
-- Alphabetical index pages (e.g., /faculty/A/, /faculty/B/, /faculty/C/)
-- Department/category sub-pages (e.g., /cs/faculty, /math/faculty)
-- Any other grouping links that lead to more faculty listings
+PAGINATION RULES — child_page_urls (exactly ONE of the 3 allowed patterns below):
 
-Look for actual clickable links in the HTML. Do NOT guess or construct URLs
-from patterns — only include URLs that have visible anchor tags in the HTML.
+Pattern 1 — Sequential single next page (numbered or alphabetical):
+  If the listing uses sequential pagination (page 1→2→3 or A→B→C),
+  include ONLY the IMMEDIATE next page URL. Do NOT enumerate all pages.
+  Example: if current page is /faculty?page=1, output only [".../faculty?page=2"]
+  Example: if current page is /faculty/A/, output only [".../faculty/B/"]
 
-If the listing has a single linear "next page" progression, include only the
-next page URL in the array. If there are multiple sibling pages, include all
-of them.
+Pattern 2 — Sequential next page PLUS sibling category pages:
+  If the listing has a sequential next page AND multiple sub-categories on the
+  current page (e.g., departments), include the next page + all category links.
+  Example: next page=2 + departments=[CS, Math, Physics] → [".../page/2", ".../cs", ".../math", ".../physics"]
+
+Pattern 3 — Sibling pages only (no sequential pagination):
+  If the listing only has department/category sub-pages with NO "next page" link,
+  include all sibling sub-category URLs.
+  Example: [".../cs/faculty", ".../math/faculty", ".../physics/faculty"]
+
+CRITICAL — URL relevance filter:
+- ONLY include URLs that clearly belong to the same faculty/staff listing system
+  (same website section, same navigation structure, same domain path prefix).
+- Every URL in child_page_urls MUST be a page that continues listing faculty members.
+- Do NOT include: homepages, contact pages, about pages, external websites,
+  login pages, search pages, or generic university navigation links.
+- If you are NOT certain a URL leads to more faculty listings, do NOT include it.
+- Each URL must have a visible, clickable anchor tag in the HTML — never guess or construct URLs.
 
 Set "child_page_urls" to an array of full URLs (empty array if no more pages).
 
@@ -166,7 +177,6 @@ Set "child_page_urls" to an array of full URLs (empty array if no more pages).
     }}
   ],
   "error": null,
-  "next_page_url": "https://..." or "",
   "child_page_urls": ["https://...", "https://..."]
 }}
 
@@ -198,22 +208,20 @@ HTML:
     records = data.get("records", [])
     static_values = _unmap_static_values(data.get("static_values", {}), fwd)
     llm_error = data.get("error")
-    next_page_url = data.get("next_page_url", "")
     child_page_urls = data.get("child_page_urls", [])
     if not isinstance(child_page_urls, list):
         child_page_urls = []
     if llm_error:
         log.warning("direct mode LLM reported error: %s", llm_error)
 
-    log.info("direct mode: %d records, %d static values, next_page=%s, child_pages=%d",
-             len(records), len(static_values), next_page_url or "(none)", len(child_page_urls))
+    log.info("direct mode: %d records, %d static values, child_pages=%d",
+             len(records), len(static_values), len(child_page_urls))
 
     return ListingAnalysis({
         "static_values": static_values,
         "has_detail_pages": True,
         "_direct_records": records,
         "page_error": llm_error or "",
-        "next_page_url": next_page_url or "",
         "child_page_urls": child_page_urls,
     })
 

@@ -38,28 +38,27 @@ async def scrape(
     field_names = [c.name for c in schema.extracted_columns()]
     all_records: list[dict[str, Any]] = []
     visited_urls: set[str] = set()
-    visited_list: list[str] = []
     page_num = 0
 
-    # DFS stack: each entry is (url, html) to process
-    stack: list[tuple[str, str]] = [(url, html)]
+    # DFS stack: each entry is (url, html, ancestor_chain)
+    # ancestor_chain is the ordered list of URLs from root to this node's parent
+    stack: list[tuple[str, str, list[str]]] = [(url, html, [])]
 
     while stack and page_num < MAX_PAGES:
-        current_url, current_html = stack.pop()
+        current_url, current_html, ancestor_chain = stack.pop()
         if current_url in visited_urls:
             continue
 
         page_num += 1
         visited_urls.add(current_url)
-        visited_list.append(current_url)
 
-        log.info("scrape page %d url=%s html_len=%d stack=%d",
-                 page_num, current_url, len(current_html), len(stack))
+        log.info("scrape page %d url=%s html_len=%d stack=%d ancestors=%d",
+                 page_num, current_url, len(current_html), len(stack), len(ancestor_chain))
         _update_progress(progress_callback, min(5 + page_num * 5, 30),
                          f"Analyzing page {page_num}...")
 
         analysis = await analyze_listing_page(llm, current_html, schema, current_url,
-                                              visited_pages=visited_list if page_num > 1 else None)
+                                              ancestor_urls=ancestor_chain)
         if analysis is None:
             log.error("scrape listing analysis failed on page %d", page_num)
             continue
@@ -74,9 +73,6 @@ async def scrape(
 
         # Collect child pages for DFS traversal
         child_urls: list[str] = list(analysis.child_page_urls)
-        raw_next = (analysis.next_page_url or "").strip()
-        if raw_next and raw_next.startswith("http") and raw_next not in visited_urls:
-            child_urls.append(raw_next)
 
         # Deduplicate and filter already-visited URLs
         new_children: list[str] = []
@@ -89,9 +85,10 @@ async def scrape(
         for child_url in reversed(new_children):
             child_html = await _fetch_one_url(child_url, config)
             if child_html:
-                stack.append((child_url, child_html))
+                child_chain = ancestor_chain + [current_url]
+                stack.append((child_url, child_html, child_chain))
             else:
-                log.info("scrape child page fetch failed: %s", child_url)
+                log.info("scrape child page fetch failed, skipping: %s", child_url)
 
     if not all_records:
         return []
