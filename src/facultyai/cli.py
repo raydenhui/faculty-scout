@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import warnings
 
 import click
 from rich.console import Console
@@ -22,8 +23,11 @@ console = Console()
 
 
 def _run_async(coro):
+    """Run an async coroutine with proper event-loop cleanup on Windows."""
+    warnings.filterwarnings("ignore", category=ResourceWarning)
     try:
-        return asyncio.run(coro)
+        with asyncio.Runner() as runner:
+            return runner.run(coro)
     except KeyboardInterrupt:
         pass
 

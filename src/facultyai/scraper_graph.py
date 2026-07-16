@@ -458,10 +458,13 @@ def _fetch_page_node(
         # ---- always re-fetch when skip_unchanged is enabled ---------------
         log.info("fetch_page start url=%s skip_mode=%s", url, skip_unchanged or state_skip)
         html = await _http_fetch(url, config)
-        if html and _has_content(html) and not _is_js_template(html):
+        if html and _has_content(html) and not _is_js_template(html) and len(html) >= 5000:
             log.debug("fetch_page http OK len=%d", len(html))
         else:
-            log.info("fetch_page trying Playwright fallback...")
+            if html and len(html) < 5000:
+                log.info("fetch_page HTTP response too short (%d bytes), trying Playwright...", len(html))
+            else:
+                log.info("fetch_page trying Playwright fallback...")
             html = await _playwright_fetch(url, config)
 
         if not html:

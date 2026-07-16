@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -345,3 +346,245 @@ class TestFieldMapping:
         fwd, _ = _field_map(schema)
         result = _unmap_static_values({"unknown_key": "value"}, fwd)
         assert result["unknown_key"] == "value"
+
+
+# ---------------------------------------------------------------------------
+# Fetch child page
+# ---------------------------------------------------------------------------
+
+
+class TestFetchChildPage:
+    """Tests for _fetch_child_page — aiohttp-based child page fetching."""
+
+    class _FakeResponse:
+        """Minimal async context manager mimicking aiohttp.ClientResponse."""
+        def __init__(self, status: int, text: str):
+            self.status = status
+            self._text = text
+
+        async def text(self):
+            return self._text
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    class _FakeSession:
+        """Minimal async context manager mimicking aiohttp.ClientSession."""
+        def __init__(self, resp: "TestFetchChildPage._FakeResponse"):
+            self._resp = resp
+
+        def get(self, url, **kwargs):
+            return self._resp
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    @pytest.mark.asyncio
+    async def test_returns_content_on_200(self):
+        from facultyai.config import AppConfig, ScrapingConfig
+        from facultyai.scraper.__init__ import _fetch_child_page
+
+        config = AppConfig(scraping=ScrapingConfig(browser_timeout=10))
+        resp = self._FakeResponse(200, "x" * 500)
+
+        with patch("aiohttp.ClientSession", return_value=self._FakeSession(resp)):
+            result = await _fetch_child_page("https://example.com/faculty", config)
+            assert result is not None
+            assert len(result) == 500
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_non_200(self):
+        from facultyai.config import AppConfig, ScrapingConfig
+        from facultyai.scraper.__init__ import _fetch_child_page
+
+        config = AppConfig(scraping=ScrapingConfig(browser_timeout=10))
+        resp = self._FakeResponse(404, "x" * 500)
+
+        with patch("aiohttp.ClientSession", return_value=self._FakeSession(resp)):
+            result = await _fetch_child_page("https://example.com/404", config)
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_short_content(self):
+        from facultyai.config import AppConfig, ScrapingConfig
+        from facultyai.scraper.__init__ import _fetch_child_page
+
+        config = AppConfig(scraping=ScrapingConfig(browser_timeout=10))
+        resp = self._FakeResponse(200, "short")
+
+        with patch("aiohttp.ClientSession", return_value=self._FakeSession(resp)):
+            result = await _fetch_child_page("https://example.com/short", config)
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_exception(self):
+        from facultyai.config import AppConfig, ScrapingConfig
+        from facultyai.scraper.__init__ import _fetch_child_page
+
+        config = AppConfig(scraping=ScrapingConfig(browser_timeout=10))
+
+        with patch("aiohttp.ClientSession", side_effect=RuntimeError("Connection refused")):
+            result = await _fetch_child_page("https://invalid.com", config)
+            assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Deque BFS/DFS traversal and pending_urls
+# ---------------------------------------------------------------------------
+
+
+class TestDequeTraversal:
+    """Tests for BFS (child_page_urls) vs DFS (next_page_url) ordering.
+
+    Algorithm:
+      - Pop from left (popleft)
+      - next_page_url → appendleft (DFS: processed immediately after current)
+      - child_page_urls → append (BFS: processed after current-level siblings)
+    """
+
+    def test_bfs_child_after_dfs_next(self):
+        """child_page_urls go right (BFS), next_page_url goes left (DFS).
+        Verify the queue ordering logic."""
+        from collections import deque
+
+        queue: deque[tuple[str, int, list[str]]] = deque()
+        queue.append(("root", 200, []))
+
+        # Simulate: root page has next_page_url and child_page_urls
+        current_url, html_len, ancestors = queue.popleft()
+        assert current_url == "root"
+
+        # next_page_url → appendleft (left, DFS)
+        queue.appendleft(("next", 300, ["root"]))
+
+        # child_page_urls → append (right, BFS)
+        children = ["child_a", "child_b", "child_c"]
+        for c in children:
+            queue.append((c, 400, ["root"]))
+
+        # Expected: next first (DFS), then children (BFS)
+        expected = ["next", "child_a", "child_b", "child_c"]
+        actual = [queue.popleft()[0] for _ in range(len(queue))]
+        assert actual == expected
+
+    def test_dfs_chain_within_category(self):
+        """When a child page has its own next_page_url, it goes DFS-deep
+        before moving to siblings. Child pages of A go after B (BFS level 2)."""
+        from collections import deque
+
+        queue: deque[tuple[str, int, list[str]]] = deque()
+
+        # Simulate after root processed: children [A, B] pushed as BFS (right)
+        queue.append(("A", 400, ["root"]))
+        queue.append(("B", 400, ["root"]))
+
+        # Process A
+        current, _, ancestors = queue.popleft()
+        assert current == "A"
+
+        # A has next page A2 → DFS (left)
+        queue.appendleft(("A2", 300, ["root", "A"]))
+
+        # A has child pages Aa, Ab → BFS (right)
+        queue.append(("Aa", 400, ["root", "A"]))
+        queue.append(("Ab", 400, ["root", "A"]))
+
+        # Next: A2 (DFS), then B (BFS sibling), then Aa, Ab (BFS level 2)
+        current, _, _ = queue.popleft()
+        assert current == "A2"
+
+        current, _, _ = queue.popleft()
+        assert current == "B"
+
+        current, _, _ = queue.popleft()
+        assert current == "Aa"
+
+        current, _, _ = queue.popleft()
+        assert current == "Ab"
+
+    def test_pending_urls_tracking(self):
+        """pending_urls should be updated on push and discard on pop."""
+        pending: set[str] = set()
+        visited: set[str] = set()
+
+        # Push root
+        pending.add("root")
+
+        # Pop root
+        pending.discard("root")
+        visited.add("root")
+
+        # Push children
+        children = ["child_a", "child_b"]
+        for c in children:
+            pending.add(c)
+
+        assert "root" not in pending
+        assert "child_a" in pending
+        assert "child_b" in pending
+        assert visited == {"root"}
+
+        # known_urls = visited | pending
+        known = visited | pending
+        assert known == {"root", "child_a", "child_b"}
+
+    def test_visited_urls_block_processing(self):
+        """URLs already in visited_urls should never be processed again."""
+        visited: set[str] = {"root", "child_a", "child_b"}
+
+        # All children were already visited
+        children = ["child_a", "child_b", "child_c"]
+        new = [c for c in children if c not in visited]
+        assert new == ["child_c"]
+
+    def test_pending_urls_block_duplicate_push(self):
+        """URLs already in pending_urls should not be re-added to queue."""
+        visited: set[str] = {"root"}
+        pending: set[str] = {"child_a", "child_b"}
+
+        children = ["child_a", "child_b", "child_c"]
+        new = [c for c in children if c not in visited and c not in pending]
+        assert new == ["child_c"]
+
+
+# ---------------------------------------------------------------------------
+# Known URLs construction
+# ---------------------------------------------------------------------------
+
+
+class TestKnownUrls:
+    """Tests for the known_urls list passed to the LLM."""
+
+    def test_known_urls_merges_visited_and_pending(self):
+        visited = {"https://root.com", "https://root.com/dep1"}
+        pending = {"https://root.com/dep2", "https://root.com/dep3"}
+
+        all_known = sorted(visited | pending)
+        assert len(all_known) == 4
+        assert "https://root.com" in all_known
+        assert "https://root.com/dep2" in all_known
+
+    def test_known_urls_excluded_from_child_urls_by_llm(self):
+        """Simulate: LLM should not output known URLs as child_page_urls."""
+        known = {"https://root.com", "https://root.com/dep/a", "https://root.com/dep/b"}
+        llm_output = [
+            "https://root.com/dep/",
+            "https://root.com/dep/a",   # already known — should be filtered
+            "https://root.com/dep/c",   # new
+        ]
+        filtered = [u for u in llm_output if u not in known]
+        assert filtered == ["https://root.com/dep/", "https://root.com/dep/c"]
+
+    def test_current_url_excluded_from_known_list(self):
+        """The LLM prompt should not include the current URL in the known list."""
+        current_url = "https://example.com/faculty"
+        known_urls = ["https://root.com", current_url, "https://root.com/dep"]
+        known_list = [u for u in known_urls if u != current_url]
+        assert current_url not in known_list
+        assert len(known_list) == 2

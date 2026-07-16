@@ -68,6 +68,7 @@ class ListingAnalysis:
         self.has_detail_pages: bool = raw.get("has_detail_pages", True)
         self._direct_records: list[dict[str, Any]] = raw.get("_direct_records", [])
         self.page_error: str = raw.get("page_error", "")
+        self.next_page_url: str = raw.get("next_page_url", "")
         self.child_page_urls: list[str] = raw.get("child_page_urls", [])
 
     def to_dict(self) -> dict[str, Any]:
@@ -76,6 +77,7 @@ class ListingAnalysis:
             "has_detail_pages": self.has_detail_pages,
             "_direct_records": self._direct_records,
             "page_error": self.page_error,
+            "next_page_url": self.next_page_url,
             "child_page_urls": self.child_page_urls,
         }
 
@@ -86,6 +88,7 @@ async def analyze_listing_page(
     schema: Schema,
     url: str = "",
     ancestor_urls: list[str] | None = None,
+    known_urls: list[str] | None = None,
 ) -> ListingAnalysis | None:
     """Direct mode: LLM outputs all items with fields + profile links in one JSON."""
     field_list = _field_list_text(schema)
@@ -103,10 +106,21 @@ async def analyze_listing_page(
             f"  {i}. {u}" for i, u in enumerate(ancestor_urls, 1)
         ) + "\n"
 
+    known_text = ""
+    if known_urls:
+        known_list = [u for u in known_urls if u != url]
+        if known_list:
+            known_text = (
+                "ALREADY DISCOVERED pages (visited or queued — "
+                "do NOT output these as child/next URLs):\n"
+                + "\n".join(f"  - {u}" for u in known_list)
+                + "\n"
+            )
+
     prompt = f"""Extract ALL academic faculty members from this listing page HTML.
 
 URL: {url}
-{ancestor_text}Fields to extract per person (use the abstract field_* keys):
+{ancestor_text}{known_text}Fields to extract per person (use the abstract field_* keys):
 {field_list}
 {static_info}
 
@@ -139,34 +153,30 @@ Cloudflare challenge, redirect, empty page, or any page without faculty informat
 set "error" to a short description and leave records empty.
 Otherwise, omit the "error" field.
 
-PAGINATION RULES — child_page_urls (exactly ONE of the 3 allowed patterns below):
+PAGINATION RULES — two separate fields below:
 
-Pattern 1 — Sequential single next page (numbered or alphabetical):
-  If the listing uses sequential pagination (page 1→2→3 or A→B→C),
-  include ONLY the IMMEDIATE next page URL. Do NOT enumerate all pages.
-  Example: if current page is /faculty?page=1, output only [".../faculty?page=2"]
-  Example: if current page is /faculty/A/, output only [".../faculty/B/"]
+next_page_url — sequential continuation of the CURRENT listing:
+- If the listing has a "next page" link, include ONLY the IMMEDIATE next page URL.
+  Do NOT enumerate all future pages — just the very next one.
+  Example: on /faculty?page=1, set next_page_url to ".../faculty?page=2" (not page=3).
+  Example: on /faculty/A/, set next_page_url to ".../faculty/B/" (not /C/).
+- If this is the last page or pagination does not exist, set next_page_url to "".
 
-Pattern 2 — Sequential next page PLUS sibling category pages:
-  If the listing has a sequential next page AND multiple sub-categories on the
-  current page (e.g., departments), include the next page + all category links.
-  Example: next page=2 + departments=[CS, Math, Physics] → [".../page/2", ".../cs", ".../math", ".../physics"]
-
-Pattern 3 — Sibling pages only (no sequential pagination):
-  If the listing only has department/category sub-pages with NO "next page" link,
-  include all sibling sub-category URLs.
+child_page_urls — separate sibling/category listing pages:
+- These are DIFFERENT listing pages at the SAME level (e.g., separate department pages).
+- Include ALL sibling category/department sub-pages that contain faculty listings.
+- Include alphabet index pages ONLY if they appear as parallel sibling links (not "next").
   Example: [".../cs/faculty", ".../math/faculty", ".../physics/faculty"]
 
 CRITICAL — URL relevance filter:
 - ONLY include URLs that clearly belong to the same faculty/staff listing system
   (same website section, same navigation structure, same domain path prefix).
-- Every URL in child_page_urls MUST be a page that continues listing faculty members.
+- Every URL MUST be a page that continues listing faculty members.
 - Do NOT include: homepages, contact pages, about pages, external websites,
   login pages, search pages, or generic university navigation links.
+- Do NOT include any URL listed in the "ALREADY DISCOVERED" section above.
 - If you are NOT certain a URL leads to more faculty listings, do NOT include it.
 - Each URL must have a visible, clickable anchor tag in the HTML — never guess or construct URLs.
-
-Set "child_page_urls" to an array of full URLs (empty array if no more pages).
 
 {{
   "static_values": {{"field_6": "Department of Computer Science"}},
@@ -177,6 +187,7 @@ Set "child_page_urls" to an array of full URLs (empty array if no more pages).
     }}
   ],
   "error": null,
+  "next_page_url": "https://..." or "",
   "child_page_urls": ["https://...", "https://..."]
 }}
 
@@ -208,20 +219,22 @@ HTML:
     records = data.get("records", [])
     static_values = _unmap_static_values(data.get("static_values", {}), fwd)
     llm_error = data.get("error")
+    next_page_url = (data.get("next_page_url") or "").strip()
     child_page_urls = data.get("child_page_urls", [])
     if not isinstance(child_page_urls, list):
         child_page_urls = []
     if llm_error:
         log.warning("direct mode LLM reported error: %s", llm_error)
 
-    log.info("direct mode: %d records, %d static values, child_pages=%d",
-             len(records), len(static_values), len(child_page_urls))
+    log.info("direct mode: %d records, %d static values, next=%s, child_pages=%d",
+             len(records), len(static_values), next_page_url or "(none)", len(child_page_urls))
 
     return ListingAnalysis({
         "static_values": static_values,
         "has_detail_pages": True,
         "_direct_records": records,
         "page_error": llm_error or "",
+        "next_page_url": next_page_url,
         "child_page_urls": child_page_urls,
     })
 
