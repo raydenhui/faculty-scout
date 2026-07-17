@@ -27,7 +27,12 @@ def _run_async(coro):
     warnings.filterwarnings("ignore", category=ResourceWarning)
     try:
         with asyncio.Runner() as runner:
-            return runner.run(coro)
+            result = runner.run(coro)
+            try:
+                runner.run(asyncio.sleep(0))
+            except Exception:
+                pass
+            return result
     except KeyboardInterrupt:
         pass
 

@@ -132,9 +132,11 @@ async def visit_detail_pages(
         if shared_browser is not None:
             with contextlib.suppress(Exception):
                 await shared_browser.close()
+                await asyncio.sleep(0)  # Let transports drain before playwright stop
         if shared_playwright is not None:
             with contextlib.suppress(Exception):
                 await shared_playwright.__aexit__(None, None, None)
+                await asyncio.sleep(0)  # Allow OS-level pipe cleanup before loop shutdown
 
     if total_errors >= 5:
         log.warning("visit_detail_pages abandoned after %d+ error pages", total_errors)
