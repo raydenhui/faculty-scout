@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-ColumnType = Literal["extracted", "formula", "static"]
+ColumnType = Literal["extracted", "fallback", "formula", "static"]
 
 
 class ColumnValidation(BaseModel):
@@ -34,6 +34,9 @@ class ColumnDef(BaseModel):
     def is_extracted(self) -> bool:
         return self.type == "extracted"
 
+    def is_fallback(self) -> bool:
+        return self.type == "fallback"
+
     def is_formula(self) -> bool:
         return self.type == "formula"
 
@@ -47,6 +50,13 @@ class Schema(BaseModel):
 
     def extracted_columns(self) -> list[ColumnDef]:
         return [c for c in self.columns if c.is_extracted()]
+
+    def fallback_columns(self) -> list[ColumnDef]:
+        return [c for c in self.columns if c.is_fallback()]
+
+    def extractable_columns(self) -> list[ColumnDef]:
+        """Columns that the AI / scraper should attempt to extract (extracted + fallback)."""
+        return [c for c in self.columns if c.is_extracted() or c.is_fallback()]
 
     def formula_columns(self) -> list[ColumnDef]:
         return [c for c in self.columns if c.is_formula()]

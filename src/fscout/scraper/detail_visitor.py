@@ -167,12 +167,12 @@ async def _llm_extract_detail(
     """LLM extracts missing fields from a detail page. Returns None for unfound."""
     fields_desc = "\n".join(
         f'  "{c.name}": {c.hint or "no hint"}'
-        for c in schema.extracted_columns()
+        for c in schema.extractable_columns()
         if c.name in missing_fields
     )
     example_keys = ", ".join(
         f'"{c.name}": "value or null"'
-        for c in schema.extracted_columns()
+        for c in schema.extractable_columns()
         if c.name in missing_fields
     )
 

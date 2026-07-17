@@ -154,8 +154,8 @@ async def _add_column(args: list[str], schema: Schema, config: AppConfig) -> Non
 
     name = args[0]
     col_type = args[1]
-    if col_type not in ("extracted", "formula", "static"):
-        console.print(f"[red]Invalid type: {col_type}. Must be extracted, formula, or static.[/]")
+    if col_type not in ("extracted", "fallback", "formula", "static"):
+        console.print(f"[red]Invalid type: {col_type}. Must be extracted, fallback, formula, or static.[/]")
         return
 
     hint = None

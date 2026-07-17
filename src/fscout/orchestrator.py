@@ -230,6 +230,7 @@ async def run_pipeline(
                             records = result.get("extracted_records", [])
                             for rec in records:
                                 _fill_static_fields(rec, job, schema)
+                                _fill_fallback_fields(rec, job, schema)
                             graph_error = result.get("error")
                             log.info(
                                 "job done  uni=%s dept=%s records=%d url=%s error=%s",
@@ -346,10 +347,26 @@ def _build_record_id(university: str, department: str | None, unique_vals: dict[
 def _fill_static_fields(rec: dict[str, Any], job: dict[str, Any], schema: Any) -> None:
     meta = {
         "university_name": job["university"],
+        "department": job.get("department", ""),
+        "listing_url": job.get("listing_url", ""),
     }
     for col in schema.static_columns():
         if col.value_from and col.value_from in meta:
             rec[col.name] = meta[col.value_from]
+
+
+def _fill_fallback_fields(rec: dict[str, Any], job: dict[str, Any], schema: Any) -> None:
+    """For fallback columns: use extracted value if present, else fall back to static value_from."""
+    meta = {
+        "university_name": job["university"],
+        "department": job.get("department", ""),
+        "listing_url": job.get("listing_url", ""),
+    }
+    for col in schema.fallback_columns():
+        current = rec.get(col.name)
+        if current is None or (isinstance(current, str) and current.strip() == ""):
+            if col.value_from and col.value_from in meta:
+                rec[col.name] = meta[col.value_from]
 
 
 def _set_excel_status(

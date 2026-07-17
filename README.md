@@ -9,16 +9,31 @@ AI-driven CLI tool that scrapes university faculty information from listing page
 | Type | Description |
 |------|-------------|
 | `extracted` | Value extracted from HTML by LLM. The LLM chooses `selector`, `regex`, `llm`, or `static` extraction method per field. |
+| `fallback` | AI attempts extraction first. If the result is non-empty, it's used. If `null`/empty, falls back to a static value from `value_from`. |
 | `static` | Value filled from system-provided metadata. Use `value_from` to specify the metadata key. |
 | `formula` | Excel formula using `[@[Column Name]]` syntax. |
 
-### Available Static Metadata Keys
+### Column Attributes
 
-These keys can be referenced in `value_from` for `static` columns:
+| Attribute | Applies to | Description |
+|-----------|------------|-------------|
+| `name` | all | Column header name |
+| `type` | all | One of `extracted`, `fallback`, `static`, `formula` |
+| `hint` | `extracted`, `fallback` | Natural-language hint for the LLM during extraction |
+| `value_from` | `fallback`, `static` | Metadata key to pull a static / fallback value from (see table below) |
+| `value` | `static` | Hard-coded static value (used when `value_from` is not set) |
+| `formula` | `formula` | Excel formula string using `[@[Column Name]]` syntax |
+| `validation` | `extracted`, `fallback` | Validation rules (regex, max_length, etc.) |
+
+### Available `value_from` Keys
+
+These keys can be referenced in `value_from` for `static` and `fallback` columns:
 
 | Key | Value | Source |
 |-----|-------|--------|
 | `university_name` | The university name as entered in the input Excel file | `universities.xlsx` university column |
+| `department` | The department name as entered in the input Excel file | `universities.xlsx` department column |
+| `listing_url` | The URL of the listing page being scraped | Discovered or provided target link |
 
 ### Validation Rules (Optional)
 
@@ -74,6 +89,13 @@ The LLM uses different values to signal extraction status:
       "type": "extracted",
       "hint": "Email address",
       "validation": { "regex": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$" }
+    },
+    {
+      "name": "Department",
+      "type": "fallback",
+      "hint": "The official department name, e.g. Department of Computer Science",
+      "validation": { "max_length": 100 },
+      "value_from": "department"
     },
     {
       "name": "Institution",

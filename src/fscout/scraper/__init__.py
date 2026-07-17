@@ -148,7 +148,7 @@ async def scrape(
     2. BFS for child_page_urls (sibling categories), DFS for next_page_url (pagination)
     3. Combine all records, visit profile pages for missing fields
     """
-    field_names = [c.name for c in schema.extracted_columns()]
+    field_names = [c.name for c in schema.extractable_columns()]
     all_records: list[dict[str, Any]] = []
     visited_urls: set[str] = set()
     pending_urls: set[str] = set()

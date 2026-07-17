@@ -24,7 +24,7 @@ _JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}", re.MULTILINE)
 
 def _field_map(schema: Schema) -> tuple[dict[str, str], dict[str, str]]:
     """Build field_1..field_N → real name mapping and reverse."""
-    columns = list(schema.extracted_columns())
+    columns = list(schema.extractable_columns())
     fwd: dict[str, str] = {}
     rev: dict[str, str] = {}
     for i, col in enumerate(columns, 1):
@@ -36,7 +36,7 @@ def _field_map(schema: Schema) -> tuple[dict[str, str], dict[str, str]]:
 
 def _field_list_text(schema: Schema) -> str:
     """Produce abstract field listing for prompt."""
-    columns = list(schema.extracted_columns())
+    columns = list(schema.extractable_columns())
     lines = []
     for i, col in enumerate(columns, 1):
         lines.append(f'  field_{i} ("{col.name}"): {col.hint or "no hint"}')

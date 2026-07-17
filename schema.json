@@ -19,9 +19,10 @@
     },
     {
       "name": "Department",
-      "type": "extracted",
-      "hint": "The official department name",
-      "validation": { "max_length": 100 }
+      "type": "fallback",
+      "hint": "The official department name, not including the faculty or school name, e.g. Department of Computer Science",
+      "validation": { "max_length": 100 },
+      "value_from": "department"
     },
     {
       "name": "Institution",

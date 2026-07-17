@@ -100,6 +100,10 @@ def _rows_from_db(
             idx = col_map[col.name]
             val = parsed.get(col.name, "")
             record[idx] = val if val else ""
+        for col in schema.fallback_columns():
+            idx = col_map[col.name]
+            val = parsed.get(col.name, "")
+            record[idx] = val if val else ""
         for idx, col in static_cols:
             if col.value_from:
                 record[idx] = parsed.get(col.value_from, "")
