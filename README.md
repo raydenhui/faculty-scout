@@ -110,8 +110,6 @@ Key settings:
 | `llm.model` | `deepseek-v4-flash` | Model name |
 | `search.provider` | `duckduckgo` | Search engine for URL discovery |
 | `scraping.item_extract_mode` | `split` | `split` = CSS selector item separation + per-field methods. `direct` = LLM outputs all items in one JSON. |
-| `scraping.max_detail_pages` | `5` | Detail pages to analyze for extraction patterns |
-| `scraping.max_concurrent_jobs` | `3` | Number of concurrent scrape jobs |
 | `files.cache_ttl_url` | `604800` | URL content cache TTL in seconds (7 days). Set to `0` to disable. |
 | `output.unique_keys` | `["Email", "English Full Name"]` | Keys used for DB record deduplication |
 | `output.archive_after_not_found_runs` | `3` | Archive records not seen after N runs |
