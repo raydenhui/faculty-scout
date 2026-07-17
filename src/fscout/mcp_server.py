@@ -10,7 +10,7 @@ Run with:
     python -m fscout.mcp_server
 
 Requires the optional ``mcp`` dependency:
-    pip install "faculty-faculty-scout[mcp]"
+    pip install "faculty-scout[mcp]"
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ try:
 except ImportError as e:  # pragma: no cover
     raise SystemExit(
         "The 'mcp' package is required to run the MCP server.\n"
-        'Install it with:  pip install "faculty-faculty-scout[mcp]"'
+        'Install it with:  pip install "faculty-scout[mcp]"'
     ) from e
 
 

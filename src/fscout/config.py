@@ -46,7 +46,6 @@ class ScrapingConfig(BaseModel):
     max_concurrent_jobs: int = 3
     max_retries_per_step: int = 3
     request_delay_sec: float = 1.0
-    max_detail_pages: int = 10
 
 
 class FilesConfig(BaseModel):
@@ -60,18 +59,11 @@ class FilesConfig(BaseModel):
 
 class OutputConfig(BaseModel):
     unique_keys: list[str] = Field(default_factory=lambda: ["Email", "English Full Name"])
-    preserve_deprecated: bool = True
     archive_after_not_found_runs: int = 3
 
 
 class DepartmentConfig(BaseModel):
     discovery_enabled: bool = True
-    find_similar_department: bool = False
-    similar_search_confidence: float = 0.7
-
-
-class ChatConfig(BaseModel):
-    allow_config_changes: bool = True
 
 
 class AppConfig(BaseModel):
@@ -82,7 +74,6 @@ class AppConfig(BaseModel):
     files: FilesConfig = Field(default_factory=FilesConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     department: DepartmentConfig = Field(default_factory=DepartmentConfig)
-    chat: ChatConfig = Field(default_factory=ChatConfig)
 
     @field_validator("version")
     @classmethod
