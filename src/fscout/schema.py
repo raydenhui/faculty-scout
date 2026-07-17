@@ -1,4 +1,4 @@
-"""Schema definition handling for FacultyAI.
+﻿"""Schema definition handling for scout.
 
 Parses ``schema.json`` and resolves column types (extracted, formula, static).
 """

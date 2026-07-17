@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from facultyai.schema import Schema, load_schema
+from fscout.schema import Schema, load_schema
 
 
 class TestSchemaLoading:

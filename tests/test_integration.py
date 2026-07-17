@@ -9,9 +9,9 @@ import pytest
 
 sys.path.insert(0, "src")
 
-from facultyai.schema import load_schema
-from facultyai.scraper.__init__ import _normalize_fields
-from facultyai.scraper_graph import _apply_schema_validation
+from fscout.schema import load_schema
+from fscout.scraper.__init__ import _normalize_fields
+from fscout.scraper_graph import _apply_schema_validation
 
 SAMPLE_RECORDS = [
     {"Title": "Prof", "English Full Name": "LUO, Yuhan", "Chinese Full Name": "羅雨菡",
@@ -223,7 +223,7 @@ class TestDetailPageFeatures:
 
     def test_find_missing_fields_only_nulls(self, schema):
         """_find_missing_fields should only count None (null), not '' (empty)."""
-        from facultyai.scraper.detail_visitor import _find_missing_fields
+        from fscout.scraper.detail_visitor import _find_missing_fields
 
         records = [
             {"Email": None, "Title": ""},
@@ -236,7 +236,7 @@ class TestDetailPageFeatures:
 
     def test_all_empty_fields_includes_empties(self, schema):
         """_all_empty_fields should include both None and '' values."""
-        from facultyai.scraper.detail_visitor import _all_empty_fields
+        from fscout.scraper.detail_visitor import _all_empty_fields
 
         records = [
             {"Email": None, "Title": ""},
@@ -249,7 +249,7 @@ class TestDetailPageFeatures:
 
     def test_add_remark_concatenation(self, schema):
         """Remarks should concatenate with semicolons."""
-        from facultyai.scraper.detail_visitor import _add_remark
+        from fscout.scraper.detail_visitor import _add_remark
 
         rec: dict[str, str] = {}
         _add_remark(rec, "first issue")
@@ -264,7 +264,7 @@ class TestListingPageErrorFlow:
 
     def test_page_error_in_analysis(self, schema):
         """ListingAnalysis should carry page_error and propagate via to_dict()."""
-        from facultyai.scraper.pattern_analyzer import ListingAnalysis
+        from fscout.scraper.pattern_analyzer import ListingAnalysis
 
         raw = {
             "item_selector": "",
@@ -307,7 +307,7 @@ class TestFieldMapping:
 
     def test_field_map_builds_correctly(self, schema):
         """_field_map should build forward and reverse mappings."""
-        from facultyai.scraper.pattern_analyzer import _field_map
+        from fscout.scraper.pattern_analyzer import _field_map
 
         fwd, rev = _field_map(schema)
         assert fwd["field_1"] == "Title"
@@ -319,7 +319,7 @@ class TestFieldMapping:
 
     def test_field_list_text_uses_abstract_keys(self, schema):
         """_field_list_text should use field_N keys with real names in parens."""
-        from facultyai.scraper.pattern_analyzer import _field_list_text
+        from fscout.scraper.pattern_analyzer import _field_list_text
 
         text = _field_list_text(schema)
         assert 'field_1 ("Title")' in text
@@ -328,7 +328,7 @@ class TestFieldMapping:
 
     def test_unmap_static_values(self, schema):
         """_unmap_static_values should convert field_N → real names."""
-        from facultyai.scraper.pattern_analyzer import _field_map, _unmap_static_values
+        from fscout.scraper.pattern_analyzer import _field_map, _unmap_static_values
 
         fwd, _ = _field_map(schema)
         result = _unmap_static_values(
@@ -341,7 +341,7 @@ class TestFieldMapping:
 
     def test_unmap_static_values_passthrough(self, schema):
         """Values not in the mapping should pass through unchanged."""
-        from facultyai.scraper.pattern_analyzer import _field_map, _unmap_static_values
+        from fscout.scraper.pattern_analyzer import _field_map, _unmap_static_values
 
         fwd, _ = _field_map(schema)
         result = _unmap_static_values({"unknown_key": "value"}, fwd)
@@ -387,8 +387,8 @@ class TestFetchChildPage:
 
     @pytest.mark.asyncio
     async def test_returns_content_on_200(self):
-        from facultyai.config import AppConfig, ScrapingConfig
-        from facultyai.scraper.__init__ import _fetch_child_page
+        from fscout.config import AppConfig, ScrapingConfig
+        from fscout.scraper.__init__ import _fetch_child_page
 
         config = AppConfig(scraping=ScrapingConfig(browser_timeout=10))
         resp = self._FakeResponse(200, "x" * 500)
@@ -400,8 +400,8 @@ class TestFetchChildPage:
 
     @pytest.mark.asyncio
     async def test_returns_none_on_non_200(self):
-        from facultyai.config import AppConfig, ScrapingConfig
-        from facultyai.scraper.__init__ import _fetch_child_page
+        from fscout.config import AppConfig, ScrapingConfig
+        from fscout.scraper.__init__ import _fetch_child_page
 
         config = AppConfig(scraping=ScrapingConfig(browser_timeout=10))
         resp = self._FakeResponse(404, "x" * 500)
@@ -412,8 +412,8 @@ class TestFetchChildPage:
 
     @pytest.mark.asyncio
     async def test_returns_none_on_short_content(self):
-        from facultyai.config import AppConfig, ScrapingConfig
-        from facultyai.scraper.__init__ import _fetch_child_page
+        from fscout.config import AppConfig, ScrapingConfig
+        from fscout.scraper.__init__ import _fetch_child_page
 
         config = AppConfig(scraping=ScrapingConfig(browser_timeout=10))
         resp = self._FakeResponse(200, "short")
@@ -424,8 +424,8 @@ class TestFetchChildPage:
 
     @pytest.mark.asyncio
     async def test_returns_none_on_exception(self):
-        from facultyai.config import AppConfig, ScrapingConfig
-        from facultyai.scraper.__init__ import _fetch_child_page
+        from fscout.config import AppConfig, ScrapingConfig
+        from fscout.scraper.__init__ import _fetch_child_page
 
         config = AppConfig(scraping=ScrapingConfig(browser_timeout=10))
 

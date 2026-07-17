@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for FacultyAI tests."""
+"""Shared pytest fixtures for Faculty Scout tests."""
 
 from __future__ import annotations
 

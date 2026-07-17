@@ -1,4 +1,4 @@
-"""Custom web scraper module for FacultyAI.
+﻿"""Custom web scraper module for scout.
 
 LLM directly extracts all faculty records from the listing page HTML.
 Detail pages are visited for any missing fields (null values).

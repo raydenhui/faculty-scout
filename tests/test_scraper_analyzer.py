@@ -10,8 +10,8 @@ import pytest
 
 sys.path.insert(0, "src")
 
-from facultyai.schema import load_schema
-from facultyai.scraper.pattern_analyzer import (
+from fscout.schema import load_schema
+from fscout.scraper.pattern_analyzer import (
     ListingAnalysis,
     _field_list_text,
     _field_map,
@@ -322,7 +322,7 @@ class TestAnalyzeListingPage:
 
 class TestFieldHelpers:
     def test_static_list_text(self, schema):
-        from facultyai.scraper.pattern_analyzer import _static_list_text
+        from fscout.scraper.pattern_analyzer import _static_list_text
         text = _static_list_text(schema)
         assert "Institution" in text or "static" in text.lower()
 
@@ -340,7 +340,7 @@ def _build_prompt(
 ) -> str:
     """Build the same prompt string that analyze_listing_page would produce,
     without making an actual LLM call."""
-    from facultyai.scraper.html_cleaner import clean_html
+    from fscout.scraper.html_cleaner import clean_html
 
     fwd, _rev = _field_map(schema)
 
@@ -391,5 +391,5 @@ def _fake_response(content):
 
 
 def _static_list_text(schema) -> str:
-    from facultyai.scraper.pattern_analyzer import _static_list_text
+    from fscout.scraper.pattern_analyzer import _static_list_text
     return _static_list_text(schema)

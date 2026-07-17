@@ -7,8 +7,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from facultyai.database import Database
-from facultyai.input_manager import sync_input_excel
+from fscout.database import Database
+from fscout.input_manager import sync_input_excel
 
 
 @pytest.fixture

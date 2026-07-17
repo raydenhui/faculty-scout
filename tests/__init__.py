@@ -1,1 +1,1 @@
-"""FacultyAI test suite."""
+"""Faculty Scout test suite."""

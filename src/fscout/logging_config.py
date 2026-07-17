@@ -1,7 +1,7 @@
-"""Centralised logging configuration for FacultyAI.
+﻿"""Centralised logging configuration for fscout.
 
 Usage:
-    from facultyai.logging_config import get_logger
+    from ffscout.logging_config import get_logger
     log = get_logger(__name__)
     log.debug("detail"), log.info("milestone"), log.warning("issue"), log.error("fail")
 """
@@ -28,7 +28,7 @@ def configure(verbose: bool = False, debug: bool = False) -> None:
     level = logging.DEBUG if debug else (logging.INFO if verbose else logging.WARNING)
     fmt = LOG_FORMAT_VERBOSE if debug else LOG_FORMAT
 
-    root = logging.getLogger("facultyai")
+    root = logging.getLogger("fscout")
     root.setLevel(level)
     root.handlers.clear()
     root.propagate = False
@@ -50,7 +50,7 @@ def configure(verbose: bool = False, debug: bool = False) -> None:
     # Separate file for full LLM conversations (always when debug)
     if debug:
         from pathlib import Path
-        llm_log = logging.getLogger("facultyai.llm_conversation")
+        llm_log = logging.getLogger("fscout.llm_conversation")
         llm_log.handlers.clear()
         llm_log.propagate = False
         llm_log.setLevel(logging.DEBUG)
@@ -61,12 +61,12 @@ def configure(verbose: bool = False, debug: bool = False) -> None:
 
 def get_llm_logger() -> logging.Logger:
     """Return a logger for LLM conversation content (prompts + responses)."""
-    return logging.getLogger("facultyai.llm_conversation")
+    return logging.getLogger("fscout.llm_conversation")
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Return a logger child of the facultyai namespace."""
-    return logging.getLogger(f"facultyai.{name}")
+    """Return a logger child of the fscout namespace."""
+    return logging.getLogger(f"fscout.{name}")
 
 
 def is_verbose() -> bool:

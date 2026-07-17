@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from facultyai.database import Database
+from fscout.database import Database
 
 
 @pytest.fixture

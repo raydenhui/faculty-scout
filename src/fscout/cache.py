@@ -1,4 +1,4 @@
-"""Caching layer for FacultyAI using diskcache.
+﻿"""Caching layer for scout using diskcache.
 
 Caches URL content and LLM extraction results to avoid redundant API calls.
 """

@@ -1,4 +1,4 @@
-"""LLM factory and web-search tools for FacultyAI.
+﻿"""LLM factory and web-search tools for scout.
 
 Provides ``get_llm()`` which turns the config into a LangChain ``BaseChatModel``,
 and lightweight async search helpers used by the agent graph.

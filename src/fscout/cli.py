@@ -1,4 +1,4 @@
-"""Click-based CLI entry point for FacultyAI."""
+﻿"""Click-based CLI entry point for fscout."""
 
 from __future__ import annotations
 
@@ -40,9 +40,9 @@ def _emit_json(result: dict) -> None:
 
 
 @click.group()
-@click.version_option(__version__, prog_name="facultyai")
+@click.version_option(__version__, prog_name="fscout")
 def cli() -> None:
-    """FacultyAI – AI-driven faculty information scraper."""
+    """fscout – AI-driven faculty information scraper."""
 
 
 @cli.command()
@@ -79,7 +79,7 @@ def resume(config_path: str, retry_failed: bool, skip_unchanged: bool, verbose: 
     lock = LockManager()
 
     if not lock.acquire():
-        console.print("[red]Another facultyai process is already running.[/]")
+        console.print("[red]Another fscout process is already running.[/]")
         sys.exit(1)
 
     try:
@@ -128,7 +128,7 @@ def retry(config_path: str, university: str, department: str | None, verbose: bo
     lock = LockManager()
 
     if not lock.acquire():
-        console.print("[red]Another facultyai process is already running.[/]")
+        console.print("[red]Another fscout process is already running.[/]")
         sys.exit(1)
 
     try:
@@ -153,7 +153,7 @@ def retry(config_path: str, university: str, department: str | None, verbose: bo
                     if job["status"] not in ("failed", "completed"):
                         console.print(
                             f"[yellow]Job is not in a retryable state (status: {job['status']}). "
-                            f"Use 'facultyai run --retry-failed' instead.[/]"
+                            f"Use 'fscout run --retry-failed' instead.[/]"
                         )
                         return
 
@@ -193,7 +193,7 @@ def status(config_path: str, json_out: bool) -> None:
         async with db:
             jobs = await db.list_jobs()
             if not jobs:
-                console.print("[yellow]No jobs yet. Run 'facultyai run' first.[/]")
+                console.print("[yellow]No jobs yet. Run 'fscout run' first.[/]")
             else:
                 table = Table(title="Job Status")
                 table.add_column("University", style="cyan")
@@ -306,8 +306,8 @@ def discover(config_path: str, verbose: bool, debug: bool, json_out: bool) -> No
     if not lock.acquire():
         if json_out:
             _emit_json({"success": False, "error": {"code": "LOCKED",
-                        "message": "Another facultyai process is already running."}})
-        console.print("[red]Another facultyai process is already running.[/]")
+                        "message": "Another fscout process is already running."}})
+        console.print("[red]Another fscout process is already running.[/]")
         sys.exit(1)
 
     try:
@@ -406,8 +406,8 @@ def url_only(config_path: str, verbose: bool, debug: bool, json_out: bool) -> No
     if not lock.acquire():
         if json_out:
             _emit_json({"success": False, "error": {"code": "LOCKED",
-                        "message": "Another facultyai process is already running."}})
-        console.print("[red]Another facultyai process is already running.[/]")
+                        "message": "Another fscout process is already running."}})
+        console.print("[red]Another fscout process is already running.[/]")
         sys.exit(1)
 
     try:
@@ -612,7 +612,7 @@ def _run_with_lock(config_path: str, retry_failed: bool = False, skip_unchanged:
     lock = LockManager()
 
     if not lock.acquire():
-        console.print("[red]Another facultyai process is already running.[/]")
+        console.print("[red]Another fscout process is already running.[/]")
         sys.exit(1)
 
     try:

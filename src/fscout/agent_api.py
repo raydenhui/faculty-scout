@@ -1,4 +1,4 @@
-"""Programmatic, agent-friendly API for FacultyAI.
+﻿"""Programmatic, agent-friendly API for fscout.
 
 Every function returns a plain JSON-serializable dict with a consistent
 envelope so AI agents (and scripts) can consume results without parsing
@@ -167,7 +167,7 @@ async def run(
     cfg = load_config(config_path)
     lock = LockManager()
     if not lock.acquire():
-        return err("LOCKED", "Another facultyai process is already running.")
+        return err("LOCKED", "Another fscout process is already running.")
 
     try:
         db = Database(cfg.files.database)
@@ -208,7 +208,7 @@ async def discover_departments(
     cfg = load_config(config_path)
     lock = LockManager()
     if not lock.acquire():
-        return err("LOCKED", "Another facultyai process is already running.")
+        return err("LOCKED", "Another fscout process is already running.")
 
     try:
         db = Database(cfg.files.database)

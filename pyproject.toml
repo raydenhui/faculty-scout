@@ -3,13 +3,13 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "facultyai"
+name = "faculty-scout"
 version = "0.1.0"
 description = "AI-driven async CLI tool that autonomously scrapes university faculty information."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "FacultyAI" }]
+authors = [{ name = "Faculty Scout" }]
 dependencies = [
     "click>=8.1,<9.0",
     "rich>=13.0",
@@ -48,8 +48,8 @@ mcp = [
 ]
 
 [project.scripts]
-facultyai = "facultyai.cli:cli"
-facultyai-mcp = "facultyai.mcp_server:main"
+fscout = "fscout.cli:cli"
+fscout-mcp = "fscout.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

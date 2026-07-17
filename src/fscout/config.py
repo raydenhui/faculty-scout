@@ -1,4 +1,4 @@
-"""Configuration loading and validation for FacultyAI."""
+﻿"""Configuration loading and validation for fscout."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ class FilesConfig(BaseModel):
     input_excel: str = "universities.xlsx"
     output_excel: str = "faculty_data.xlsx"
     schema_file: str = "schema.json"
-    database: str = "facultyai.db"
+    database: str = "fscout.db"
     cache_dir: str = "./cache"
     cache_ttl_url: int = 604800
 

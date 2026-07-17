@@ -1,4 +1,4 @@
-"""File-based locking for exclusive access to the database and output."""
+﻿"""File-based locking for exclusive access to the database and output."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 class LockManager:
     """Simple file-based advisory lock."""
 
-    def __init__(self, lock_path: str | Path = "facultyai.lock") -> None:
+    def __init__(self, lock_path: str | Path = "fscout.lock") -> None:
         self._path = Path(lock_path)
         self._fd: int | None = None
 

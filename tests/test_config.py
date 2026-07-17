@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from facultyai.config import AppConfig, LLMConfig, load_config, mask_secrets
+from fscout.config import AppConfig, LLMConfig, load_config, mask_secrets
 
 
 class TestAppConfig:

@@ -28,7 +28,7 @@ files:
   input_excel: "universities.xlsx"
   output_excel: "faculty_data.xlsx"
   schema_file: "schema.json"
-  database: "facultyai.db"
+  database: "fscout.db"
   cache_dir: "./cache"
   cache_ttl_url: 604800       # URL content cache TTL in seconds (7 days)
 

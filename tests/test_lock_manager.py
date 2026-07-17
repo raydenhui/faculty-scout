@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from facultyai.lock_manager import LockManager
+from fscout.lock_manager import LockManager
 
 
 def test_acquire_and_release(tmp_path: Path) -> None:

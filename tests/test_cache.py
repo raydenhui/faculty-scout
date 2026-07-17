@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from facultyai.cache import CacheManager
+from fscout.cache import CacheManager
 
 
 def test_url_cache_roundtrip(tmp_path: Path) -> None:

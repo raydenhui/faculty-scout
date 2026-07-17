@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from facultyai.config import LLMConfig
-from facultyai.llm_factory import get_llm
+from fscout.config import LLMConfig
+from fscout.llm_factory import get_llm
 
 
 def test_get_llm_openai() -> None:

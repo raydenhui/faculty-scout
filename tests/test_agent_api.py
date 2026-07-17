@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from facultyai import agent_api
-from facultyai.database import Database
+from fscout import agent_api
+from fscout.database import Database
 
 
 @pytest.fixture

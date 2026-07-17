@@ -1,4 +1,4 @@
-# FacultyAI
+# Faculty Scout
 
 AI-driven CLI tool that scrapes university faculty information from listing pages and exports structured data.
 
@@ -98,7 +98,7 @@ The input file defines which universities and departments to scrape.
 |--------|----------|-------------|
 | `university_name` | Yes | University name (e.g., "CityUHK", "CUHK") |
 | `department_name` | No | Department name (e.g., "Computer Science"). If omitted, triggers department discovery. |
-| `status` | No | Empty = scrape. Any value (e.g., "completed") = skip. Clear the cell to re-scrape. |
+| `status` | No | Controls re-scraping. Empty = scrape. `"completed"` = done. `"failed:..."` = error. `"Skipped"` = unchanged (will re-check on next run). Clear to re-scrape. |
 
 ## Configuration (`config.yaml`)
 
@@ -119,7 +119,7 @@ Key settings:
 ## LLM Provider & AI Gateway
 
 All LLM calls are routed through a single provider defined in the `llm` section
-of `config.yaml`. FacultyAI can talk directly to a vendor API **or** route every
+of `config.yaml`. Faculty Scout can talk directly to a vendor API **or** route every
 request through an AI gateway (LiteLLM, OpenRouter, Cloudflare AI Gateway,
 Portkey, or any OpenAI-compatible proxy) for centralized keys, caching,
 rate-limiting, fail-over, and cost tracking.
@@ -131,7 +131,7 @@ rate-limiting, fail-over, and cost tracking.
 | `provider` | all | `openai`, `deepseek`, `openai_compatible`, `azure`, `anthropic`, `google` |
 | `model` | all | Model / deployment name (as the gateway or vendor expects it) |
 | `temperature` | all | Sampling temperature (default `0.2`) |
-| `max_tokens` | all | Max output tokens (default `4096`) |
+| `max_tokens` | all | Max输出 tokens (default `4096`) |
 | `api_key` | all | API key. Supports `${ENV_VAR}` placeholders |
 | `base_url` | openai / deepseek / openai_compatible | **Gateway endpoint** — point this at your AI gateway |
 | `azure_endpoint` | azure | Azure OpenAI resource endpoint |
@@ -165,35 +165,39 @@ Secrets are never hard-coded — `${AI_GATEWAY_URL}` / `${AI_GATEWAY_KEY}` are
 resolved from environment variables at load time. Validate with:
 
 ```bash
-python -m facultyai config show      # secrets masked
-python -m facultyai config validate
+python -m fscout config show      # secrets masked
+python -m fscout config validate
 ```
 
 ## Usage
 
 ```bash
 # Run all universities in input Excel (skips rows with status filled)
-python -m facultyai run
+python -m fscout run
 
 # Run with debug logging (full LLM prompts + responses)
-python -m facultyai run --debug
+python -m fscout run --debug
+
+# Incremental re-scraping: only re-scrape pages whose HTML has changed
+# Skips unchanged pages, writes "Skipped" to Excel status
+python -m fscout run --skip-unchanged
 
 # Re-scrape: clear the "status" column in universities.xlsx and run again
 # Each completed job writes "completed" back to the Excel status column.
 
 # Check job status and run history
-python -m facultyai status
+python -m fscout status
 
 # Export from database
-python -m facultyai export
+python -m fscout export
 
 # Resume incomplete jobs
-python -m facultyai resume
+python -m fscout resume
 ```
 
 ## AI Agent / Programmatic Usage
 
-FacultyAI is designed to be driven by AI agents (e.g. Hermes) and scripts.
+Faculty Scout is designed to be driven by AI agents (e.g. Hermes) and scripts.
 Every command supports a `--json` flag that emits a machine-readable envelope
 to stdout, and logs/progress go to stderr so stdout stays clean.
 
@@ -210,41 +214,42 @@ Exit code is `0` on success, `1` on failure.
 
 ```bash
 # Add a target without touching Excel
-python -m facultyai add-target HKU "Computer Science" --link https://cs.hku.hk/people --json
+python -m fscout add-target HKU "Computer Science" --link https://cs.hku.hk/people --json
 
 # List queued targets
-python -m facultyai targets --json
+python -m fscout targets --json
 
 # Discover departments for a university-only entry
-python -m facultyai discover --json
+python -m fscout discover --json
 
 # Run the pipeline, get per-job results
-python -m facultyai run --json
+python -m fscout run --json
 
 # Query job status + summary counts
-python -m facultyai status --json
+python -m fscout status --json
 
 # Fetch extracted records (optionally filtered)
-python -m facultyai results --university HKU --department "Computer Science" --json
+python -m fscout results --university HKU --department "Computer Science" --json
 
 # Export to JSON instead of Excel
-python -m facultyai export --format json --output faculty.json --json
+python -m fscout export --format json --output faculty.json --json
 ```
 
 Example: pipe to `jq`:
 
 ```bash
-python -m facultyai status --json 2>/dev/null | jq '.data.summary'
-python -m facultyai results --json 2>/dev/null | jq '.data.records[].Email'
+python -m fscout status --json 2>/dev/null | jq '.data.summary'
+python -m fscout results --json 2>/dev/null | jq '.data.records[].Email'
 ```
 
 ### Python API
 
 ```python
-from facultyai import agent_api
+from fscout import agent_api
 
 await agent_api.add_target("HKU", "Computer Science")
 await agent_api.run()                       # {"success": True, "data": {...}}
+await agent_api.run(skip_unchanged=True)    # incremental: skip unchanged pages
 await agent_api.get_results(university="HKU")
 await agent_api.export(fmt="json")
 ```
@@ -254,8 +259,8 @@ await agent_api.export(fmt="json")
 Install the optional MCP dependency and run the server:
 
 ```bash
-pip install "facultyai[mcp]"
-facultyai-mcp        # stdio transport
+pip install "faculty-fscout[mcp]"
+fscout-mcp        # stdio transport
 ```
 
 Exposed tools:
@@ -271,4 +276,3 @@ Exposed tools:
 | `export_results` | Export records to JSON/Excel |
 
 Each tool returns the same JSON envelope as the CLI/`agent_api`.
-

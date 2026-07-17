@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from facultyai.cache import CacheManager
-from facultyai.config import AppConfig, LLMConfig
-from facultyai.llm_factory import get_llm
-from facultyai.schema import ColumnDef, Schema
-from facultyai.scraper_graph import (
+from fscout.cache import CacheManager
+from fscout.config import AppConfig, LLMConfig
+from fscout.llm_factory import get_llm
+from fscout.schema import ColumnDef, Schema
+from fscout.scraper_graph import (
     AgentState,
     _has_content,
     _llm_response_text,

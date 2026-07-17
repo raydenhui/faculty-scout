@@ -1,16 +1,16 @@
-"""MCP server exposing FacultyAI as tools for AI agents (e.g. Hermes).
+﻿"""MCP server exposing fscout as tools for AI agents (e.g. Hermes).
 
-Wraps the functions in ``facultyai.agent_api`` as MCP tools so an agent
+Wraps the functions in ``fscout.agent_api`` as MCP tools so an agent
 can orchestrate the scrape → discover → export loop through typed tool
 calls instead of parsing CLI text.
 
 Run with:
-    facultyai-mcp
+    fscout-mcp
     # or
-    python -m facultyai.mcp_server
+    python -m fscout.mcp_server
 
 Requires the optional ``mcp`` dependency:
-    pip install "facultyai[mcp]"
+    pip install "faculty-faculty-scout[mcp]"
 """
 
 from __future__ import annotations
@@ -25,11 +25,11 @@ try:
 except ImportError as e:  # pragma: no cover
     raise SystemExit(
         "The 'mcp' package is required to run the MCP server.\n"
-        'Install it with:  pip install "facultyai[mcp]"'
+        'Install it with:  pip install "faculty-faculty-scout[mcp]"'
     ) from e
 
 
-mcp = FastMCP("facultyai")
+mcp = FastMCP("fscout")
 
 _DEFAULT_CONFIG = "config.yaml"
 
@@ -113,7 +113,7 @@ def _dump(result: dict[str, Any]) -> str:
 
 
 def main() -> None:
-    """Entry point for the ``facultyai-mcp`` script (stdio transport)."""
+    """Entry point for the ``fscout-mcp`` script (stdio transport)."""
     mcp.run()
 
 

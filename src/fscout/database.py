@@ -1,4 +1,4 @@
-"""Async SQLite database layer for FacultyAI.
+﻿"""Async SQLite database layer for scout.
 
 Handles schema creation, migrations, and CRUD operations.
 """
@@ -117,7 +117,7 @@ def _record_id(university: str, department: str | None, unique_vals: dict[str, A
 
 
 class Database:
-    """Async SQLite facade for FacultyAI."""
+    """Async SQLite facade for scout."""
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)

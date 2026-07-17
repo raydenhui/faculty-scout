@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from click.testing import CliRunner
 
-from facultyai.cli import cli
+from fscout.cli import cli
 
 
 class TestCLI:

@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from facultyai.database import Database
-from facultyai.exporter import _col_letter, _resolve_formula, export_to_excel
-from facultyai.schema import ColumnDef, Schema
+from fscout.database import Database
+from fscout.exporter import _col_letter, _resolve_formula, export_to_excel
+from fscout.schema import ColumnDef, Schema
 
 
 def test_col_letter() -> None:

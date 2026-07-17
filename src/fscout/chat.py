@@ -1,4 +1,4 @@
-"""Interactive chat agent for FacultyAI configuration and queries."""
+﻿"""Interactive chat agent for fscout configuration and queries."""
 
 from __future__ import annotations
 
@@ -44,19 +44,19 @@ async def run_chat(
     """Start the interactive chat REPL."""
     console.print(
         Panel.fit(
-            "[bold blue]FacultyAI Chat[/]\nType [cyan]/help[/] for available commands.",
+            "[bold blue]fscout Chat[/]\nType [cyan]/help[/] for available commands.",
             border_style="blue",
         )
     )
 
     session = PromptSession(
-        history=FileHistory(".facultyai_chat_history"),
+        history=FileHistory(".fscout_chat_history"),
         style=_STYLE,
     )
 
     while True:
         try:
-            line = await session.prompt_async("facultyai> ", style=_STYLE)
+            line = await session.prompt_async("fscout> ", style=_STYLE)
         except (EOFError, KeyboardInterrupt):
             console.print("\nGoodbye!")
             break

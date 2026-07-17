@@ -1,4 +1,4 @@
-"""FacultyAI – AI-driven async CLI tool for scraping university faculty information."""
+﻿"""Faculty Scout – AI-driven async CLI tool for scraping university faculty information."""
 
 from __future__ import annotations
 
