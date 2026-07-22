@@ -1,9 +1,16 @@
 {
   "columns": [
     {
+      "name": "Title",
+      "type": "extracted",
+      "hint": "The person's title, e.g. Dr., Prof., etc. If the person is professor but has no title, use 'Prof.' as the title. If the person is not a professor, leave blank.",
+      "validation": { "max_length": 30 }
+    },
+    {
       "name": "English Full Name",
       "type": "extracted",
-      "hint": "The professor's full name in English, e.g. John Smith"
+      "hint": "The professor's full name in English, e.g. John Smith",
+      "required": true
     },
     {
       "name": "Position",
@@ -15,6 +22,7 @@
       "name": "Email",
       "type": "extracted",
       "hint": "Email address, usually from the university domain",
+      "required": true,
       "validation": { "regex": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$" }
     },
     {
