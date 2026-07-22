@@ -1,7 +1,7 @@
 ﻿"""Centralised logging configuration for fscout.
 
 Usage:
-    from ffscout.logging_config import get_logger
+    from fscout.logging_config import get_logger
     log = get_logger(__name__)
     log.debug("detail"), log.info("milestone"), log.warning("issue"), log.error("fail")
 """
@@ -10,6 +10,11 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+LOG_DIR = Path("logs")
+_MAX_LOG_FILES = 10
 
 # Module-level flag – set by CLI before pipeline runs.
 _verbose: bool = False
@@ -39,24 +44,38 @@ def configure(verbose: bool = False, debug: bool = False) -> None:
     handler.setLevel(level)
     root.addHandler(handler)
 
-    # File handler for debug logs (debug.log)
-    if debug:
-        from pathlib import Path
-        fh = logging.FileHandler(Path("debug.log"), mode="a", encoding="utf-8")
-        fh.setFormatter(logging.Formatter(LOG_FORMAT_VERBOSE, datefmt="%Y-%m-%d %H:%M:%S"))
-        fh.setLevel(logging.DEBUG)
-        root.addHandler(fh)
+    if not debug:
+        return
 
-    # Separate file for full LLM conversations (always when debug)
-    if debug:
-        from pathlib import Path
-        llm_log = logging.getLogger("fscout.llm_conversation")
-        llm_log.handlers.clear()
-        llm_log.propagate = False
-        llm_log.setLevel(logging.DEBUG)
-        fh2 = logging.FileHandler(Path("llm_conversation.log"), mode="w", encoding="utf-8")
-        fh2.setFormatter(logging.Formatter("%(message)s"))
-        llm_log.addHandler(fh2)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+
+    # File handler for debug logs
+    debug_path = LOG_DIR / f"debug_{timestamp}.log"
+    fh = logging.FileHandler(debug_path, mode="w", encoding="utf-8")
+    fh.setFormatter(logging.Formatter(LOG_FORMAT_VERBOSE, datefmt="%Y-%m-%d %H:%M:%S"))
+    fh.setLevel(logging.DEBUG)
+    root.addHandler(fh)
+
+    # Separate file for full LLM conversations
+    llm_path = LOG_DIR / f"llm_{timestamp}.log"
+    llm_log = logging.getLogger("fscout.llm_conversation")
+    llm_log.handlers.clear()
+    llm_log.propagate = False
+    llm_log.setLevel(logging.DEBUG)
+    fh2 = logging.FileHandler(llm_path, mode="w", encoding="utf-8")
+    fh2.setFormatter(logging.Formatter("%(message)s"))
+    llm_log.addHandler(fh2)
+
+    _clean_old_logs(LOG_DIR, "debug_*.log")
+    _clean_old_logs(LOG_DIR, "llm_*.log")
+
+
+def _clean_old_logs(directory: Path, pattern: str) -> None:
+    """Keep at most _MAX_LOG_FILES matching files, removing the oldest."""
+    files = sorted(directory.glob(pattern), key=lambda p: p.stat().st_mtime)
+    while len(files) > _MAX_LOG_FILES:
+        files.pop(0).unlink(missing_ok=True)
 
 
 def get_llm_logger() -> logging.Logger:
