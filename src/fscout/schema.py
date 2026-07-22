@@ -30,6 +30,7 @@ class ColumnDef(BaseModel):
     value: Any | None = None
     value_from: str | None = None
     validation: ColumnValidation | None = None
+    required: bool = False
 
     def is_extracted(self) -> bool:
         return self.type == "extracted"
@@ -65,6 +66,10 @@ class Schema(BaseModel):
 
     def column_names(self) -> list[str]:
         return [c.name for c in self.columns]
+
+    def required_column_names(self) -> list[str]:
+        """Column names marked as required — must have a value, or detail page is visited."""
+        return [c.name for c in self.columns if c.required]
 
     def fingerprint(self) -> str:
         """A stable hash of the extracted columns for cache keys."""

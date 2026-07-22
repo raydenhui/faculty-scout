@@ -52,14 +52,26 @@ async def visit_detail_pages(
 
     log.info("visit_detail_pages found %d detail links", len(detail_urls))
 
+    required_names = schema.required_column_names()
     missing_fields = _find_missing_fields(records, field_names)
-    if not missing_fields:
+    all_empty = _all_empty_fields(records, field_names)
+
+    if required_names:
+        need_detail = False
+        for f in required_names:
+            if f in missing_fields:
+                need_detail = True
+                break
+            if f in all_empty:
+                need_detail = True
+                break
+        if not need_detail:
+            log.info("visit_detail_pages all required fields present, skipping")
+            return records
+    elif not missing_fields:
         log.info("visit_detail_pages no null fields (empty is valid), skipping")
         return records
 
-    # Also include empty-string fields so LLM can fill them if data is found
-    all_empty = _all_empty_fields(records, field_names)
-    # Preserve schema order (non-deterministic set() fixed)
     extract_fields = [f for f in field_names if f in set(missing_fields) | set(all_empty)]
     log.info("visit_detail_pages extracting fields: %s", extract_fields)
 
