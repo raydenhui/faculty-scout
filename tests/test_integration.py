@@ -753,3 +753,42 @@ class TestFetchPageNodeCache:
                 assert result2["page_html"] == contents[1]
         finally:
             cm.close()
+
+
+class TestHasExistingRecords:
+    """Tests for _has_existing_records — Excel record presence check."""
+
+    def test_no_file_returns_false(self, tmp_path: Path):
+        from fscout.pipeline import _has_existing_records
+        out = tmp_path / "nonexistent.xlsx"
+        assert _has_existing_records(out, "HKU", "CS") is False
+
+    def test_file_exists_no_source_key_column(self, tmp_path: Path):
+        import pandas as pd
+        from fscout.pipeline import _has_existing_records
+        out = tmp_path / "output.xlsx"
+        df = pd.DataFrame({"Name": ["Alice"], "Institution": ["HKU"]})
+        df.to_excel(out, index=False)
+        assert _has_existing_records(out, "HKU", "CS") is True
+
+    def test_no_matching_record(self, tmp_path: Path):
+        import pandas as pd
+        from fscout.pipeline import _has_existing_records, _SOURCE_KEY_HEADER
+        out = tmp_path / "output.xlsx"
+        df = pd.DataFrame({_SOURCE_KEY_HEADER: ["Physics/HKU", "Math/CUHK"]})
+        df.to_excel(out, index=False)
+        assert _has_existing_records(out, "HKU", "CS") is False
+
+    def test_matching_record_exists(self, tmp_path: Path):
+        import pandas as pd
+        from fscout.pipeline import _has_existing_records, _SOURCE_KEY_HEADER
+        out = tmp_path / "output.xlsx"
+        df = pd.DataFrame({_SOURCE_KEY_HEADER: ["Physics/HKU", "CS/HKU", "Math/CUHK"]})
+        df.to_excel(out, index=False)
+        assert _has_existing_records(out, "HKU", "CS") is True
+
+    def test_corrupt_file_returns_true(self, tmp_path: Path):
+        from fscout.pipeline import _has_existing_records
+        out = tmp_path / "corrupt.xlsx"
+        out.write_text("not an excel file")
+        assert _has_existing_records(out, "HKU", "CS") is True

@@ -17,7 +17,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 
 from .cache import CacheManager
 from .config import AppConfig
-from .exporter import export_records
+from .exporter import _SOURCE_KEY_HEADER, export_records
 from .llm_factory import get_llm
 from .logging_config import get_logger
 from .schema import Schema
@@ -142,6 +142,22 @@ def _append_departments_to_excel(
     df.to_excel(path, index=False)
 
 
+def _has_existing_records(output_path: str | Path, university: str, department: str) -> bool:
+    """Check if the output Excel already has records for a source_key."""
+    path = Path(output_path)
+    if not path.exists():
+        return False
+    try:
+        df = pd.read_excel(path, sheet_name=0)
+        if _SOURCE_KEY_HEADER not in df.columns:
+            return True  # old format without _source_key — treat as existing
+        target_key = f"{department}/{university}"
+        col = df[_SOURCE_KEY_HEADER].astype(str)
+        return bool((col.str.strip() == target_key).any())
+    except Exception:
+        return True  # on error, assume records exist (safe — won't force)
+
+
 async def run_pipeline(
     config: AppConfig,
     schema: Schema,
@@ -230,12 +246,17 @@ async def run_pipeline(
                         )
                     )
 
+                    # Force rescrape if no existing records for this dept in output Excel
+                    should_force = force or not _has_existing_records(
+                        config.files.output_excel, t["university"], t["department"]
+                    )
+
                     state: dict[str, Any] = {
                         "university": t["university"],
                         "department": t["department"],
                         "need_discovery": False,
                         "listing_url": t["link"],
-                        "force_rescrape": force,
+                        "force_rescrape": should_force,
                     }
                     result = await agent.ainvoke(state)
                     scraper_graph._progress_callback = None

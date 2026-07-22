@@ -22,6 +22,15 @@ universities.xlsx  ──read──►  pipeline (in-memory)
 
 Output rows are deduplicated using a hidden `_source_key` column containing `{department}/{university}` from the input file. When re-scraping a department, old rows matching that key are replaced — no LLM-filled columns are used for matching, guaranteeing consistency regardless of schema configuration.
 
+### Caching
+
+Fetched page HTML is cached indefinitely (no expiry). On subsequent runs, pages whose content is unchanged from the cache are skipped — saving LLM cost and time. Two exceptions always force a fresh scrape regardless:
+
+- **No existing records:** If the output Excel has no rows for a department (checked via the hidden `_source_key` column), the page is always scraped. This ensures new targets never get skipped.
+- **`--force` flag:** Overrides all caching for the run.
+
+Set `files.cache_enabled: false` to disable caching entirely.
+
 ## Schema Configuration (`schema.json`)
 
 ### Column Types
@@ -32,6 +41,19 @@ Output rows are deduplicated using a hidden `_source_key` column containing `{de
 | `fallback` | LLM extraction first; if `null`/empty, falls back to static `value_from`. |
 | `static` | Value filled from system-provided metadata via `value_from`. |
 | `formula` | Excel formula using `[@[Column Name]]` syntax. |
+
+### Column Attributes
+
+| Attribute | Applies to | Description |
+|-----------|------------|-------------|
+| `name` | all | Column header name |
+| `type` | all | One of `extracted`, `fallback`, `static`, `formula` |
+| `hint` | `extracted`, `fallback` | Natural-language hint for the LLM during extraction |
+| `value_from` | `fallback`, `static` | Metadata key for static / fallback value |
+| `value` | `static` | Hard-coded static value (used when `value_from` is not set) |
+| `formula` | `formula` | Excel formula using `[@[Column Name]]` syntax |
+| `required` | `extracted`, `fallback` | If `true`, a `null` or `""` value triggers a detail page visit |
+| `validation` | `extracted`, `fallback` | Validation rules (regex, max_length, etc.) |
 
 ### Available `value_from` Keys
 
@@ -56,8 +78,10 @@ Output rows are deduplicated using a hidden `_source_key` column containing `{de
 | Value | Meaning | Triggers detail page? |
 |-------|---------|----------------------|
 | `"actual value"` | Extracted successfully | No |
-| `""` (empty string) | Field not applicable to this person | No |
-| `null` | Field should exist but not visible on listing page | **Yes** — visits profile page |
+| `""` (empty string) | Field not applicable to this person | Only if `required: true` |
+| `null` | Field should exist but not visible on listing page | Yes (always), or via `required: true` |
+
+The `required` attribute provides a schema-level override: if a field is marked `required: true`, the scraper visits the profile page whenever that field is `null` **or** `""` — regardless of what other fields say. This guarantees critical fields like Email and Name are always pursued, even if the LLM returned `""` for them on the listing page.
 
 ### Example Schema
 
@@ -73,7 +97,8 @@ Output rows are deduplicated using a hidden `_source_key` column containing `{de
     {
       "name": "English Full Name",
       "type": "extracted",
-      "hint": "The professor's full name in English"
+      "hint": "The professor's full name in English",
+      "required": true
     },
     {
       "name": "Chinese Full Name",
@@ -91,6 +116,7 @@ Output rows are deduplicated using a hidden `_source_key` column containing `{de
       "name": "Email",
       "type": "extracted",
       "hint": "Email address",
+      "required": true,
       "validation": { "regex": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$" }
     },
     {
@@ -110,8 +136,7 @@ Output rows are deduplicated using a hidden `_source_key` column containing `{de
       "type": "extracted",
       "hint": "Additional information about the scraping process"
     }
-  ],
-  "dedup_keys": ["Institution", "Department"]
+  ]
 }
 ```
 
@@ -130,13 +155,15 @@ Output rows are deduplicated using a hidden `_source_key` column containing `{de
 |---------|---------|-------------|
 | `llm.provider` | `deepseek` | LLM provider (openai, deepseek, openai_compatible, azure, anthropic, google) |
 | `llm.model` | `deepseek-v4-flash` | Model name |
+| `llm.temperature` | `0.2` | Sampling temperature |
+| `llm.max_tokens` | `4096` | Max output tokens |
 | `search.provider` | `duckduckgo` | Search engine for URL discovery |
 | `scraping.headless` | `true` | Run Playwright in headless mode |
 | `scraping.browser_timeout` | `30` | Browser page load timeout (seconds) |
 | `scraping.max_concurrent_jobs` | `3` | Number of concurrent scrape targets |
 | `scraping.max_retries_per_step` | `3` | Retries per LangGraph node step |
 | `scraping.request_delay_sec` | `1.0` | Minimum delay between LLM requests |
-| `files.cache_ttl_url` | `604800` | URL content cache TTL in seconds (7 days) |
+| `files.cache_enabled` | `true` | Cache fetched HTML for skip-unchanged detection |
 | `department.discovery_enabled` | `true` | Auto-discover departments for university-only entries |
 
 ## LLM Provider & AI Gateway
@@ -170,13 +197,14 @@ python -m fscout config validate
 
 ```bash
 # Run all pending targets from the input Excel
+# By default, pages with unchanged HTML are skipped (cached comparison)
 python -m fscout run
 
 # Run with debug logging (full LLM prompts + responses)
 python -m fscout run --debug
 
-# Incremental: skip targets whose page HTML is unchanged from cache
-python -m fscout run --skip-unchanged
+# Always re-scrape even if page content is unchanged
+python -m fscout run --force
 
 # Discover departments for university-only entries
 python -m fscout discover
@@ -213,7 +241,7 @@ python -m fscout export --format json --output faculty.json --json
 from fscout import agent_api
 
 await agent_api.run()
-await agent_api.run(skip_unchanged=True)
+await agent_api.run(force=True)
 await agent_api.discover_departments("HKU")
 await agent_api.export(fmt="json")
 ```
