@@ -71,15 +71,16 @@ async def discover_departments(
 
 @mcp.tool()
 async def run_scrape(
-    retry_failed: bool = False,
+    force: bool = False,
     config_path: str = _DEFAULT_CONFIG,
 ) -> str:
     """Run the full scrape pipeline over all pending targets.
 
     Returns per-job results and a summary {completed, failed, total}.
     Long-running: fetches pages and calls the LLM for every target.
+    Set force=True to rescrape even when existing records are found.
     """
-    return _dump(await agent_api.run(config_path, retry_failed=retry_failed))
+    return _dump(await agent_api.run(config_path, force=force))
 
 
 @mcp.tool()
