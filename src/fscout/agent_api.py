@@ -36,7 +36,7 @@ def err(code: str, message: str, **extra: Any) -> dict[str, Any]:
 
 async def run(
     config_path: str = "config.yaml",
-    skip_unchanged: bool = False,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Run the full scrape pipeline. Returns per-job results + summary."""
     cfg = load_config(config_path)
@@ -46,7 +46,7 @@ async def run(
     try:
         from .pipeline import run_pipeline
 
-        summary = await run_pipeline(cfg, schema, cache, skip_unchanged=skip_unchanged)
+        summary = await run_pipeline(cfg, schema, cache, force=force)
         return ok({"summary": summary})
     except Exception as e:
         log.error("run failed: %s", e)

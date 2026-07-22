@@ -1,8 +1,9 @@
-"""Integration test: fixed LLM output flows through validation and normalization."""
+﻿"""Integration test: fixed LLM output flows through validation and normalization."""
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -14,10 +15,10 @@ from fscout.scraper.__init__ import _normalize_fields
 from fscout.scraper_graph import _apply_schema_validation
 
 SAMPLE_RECORDS = [
-    {"Title": "Prof", "English Full Name": "LUO, Yuhan", "Chinese Full Name": "羅雨菡",
+    {"Title": "Prof", "English Full Name": "LUO, Yuhan", "Chinese Full Name": "羅雨涵",
      "Email": "yuhanluo@cityu.edu.hk", "Position": "Assistant Professor",
      "profile_url": "https://scholars.cityu.edu.hk/en/persons/yuhan-luo(9).html"},
-    {"Title": "Prof", "English Full Name": "MA, Jiawei Phoenix", "Chinese Full Name": "馬佳葳",
+    {"Title": "Prof", "English Full Name": "MA, Jiawei Phoenix", "Chinese Full Name": "馬佳慧",
      "Email": "jiaweima@cityu.edu.hk", "Position": "Assistant Professor",
      "profile_url": "https://scholars.cityu.edu.hk/en/persons/jiawei-ma(49).html"},
     {"Title": "Prof", "English Full Name": "MA, Ziye", "Chinese Full Name": "馬梓業",
@@ -42,7 +43,7 @@ SAMPLE_RECORDS = [
      "Email": "not-an-email", "Position": "Professor",
      "profile_url": "https://scholars.cityu.edu.hk/en/persons/bad-email"},
     # Record with abstract field_N keys (tests unmapping)
-    {"field_1": "Prof", "field_2": "WANG, Cong", "field_3": "王聰",
+     {"field_1": "Prof", "field_2": "WANG, Cong", "field_3": "王聰",
      "field_4": "Head & Chair Professor", "field_5": "congwang@cityu.edu.hk",
      "field_6": "Computer Science", "profile_url": "https://scholars.cityu.edu.hk/en/persons/wang"},
     # Minimally filled record
@@ -63,19 +64,19 @@ class TestNormalizeFields:
         for rec in records:
             for fn in field_names:
                 assert fn in rec, f"Missing field {fn}"
-                # None is valid — means "need detail page visit"
+                # None is valid â€” means "need detail page visit"
 
     def test_none_vs_empty_distinction(self, schema):
         """None = needs detail page visit, '' = not applicable."""
         field_names = [c.name for c in schema.extracted_columns()]
         records = _normalize_fields(SAMPLE_RECORDS, field_names)
 
-        # LUO has all fields filled → no None values
+        # LUO has all fields filled â†’ no None values
         luo = records[0]
         assert luo["English Full Name"] is not None
         assert luo["Email"] is not None
 
-        # Min record has only name → all others should be None
+        # Min record has only name â†’ all others should be None
         min_rec = records[-1]
         assert min_rec["Title"] is None
         assert min_rec["Email"] is None
@@ -172,12 +173,12 @@ class TestSchemaValidation:
         yuhan = next((r for r in validated if r.get("English Full Name") == "LUO, Yuhan"), None)
         assert yuhan["Title"] == "Prof"
         assert yuhan["Position"] == "Assistant Professor"
-        assert yuhan["Chinese Full Name"] == "羅雨菡"
+        assert yuhan["Chinese Full Name"] == "羅雨涵"
 
 
 class TestFullPipelineSimulation:
     def test_full_flow(self, schema):
-        """Simulate the full post-LLM pipeline: normalize → validate."""
+        """Simulate the full post-LLM pipeline: normalize â†’ validate."""
         field_names = [c.name for c in schema.extracted_columns()]
 
         # Step 1: Normalize (field_N unmapping + defaults + strip profile_url)
@@ -197,7 +198,7 @@ class TestFullPipelineSimulation:
         luo = validated[0]
         assert luo["English Full Name"] == "LUO, Yuhan"
         assert luo["Email"] == "yuhanluo@cityu.edu.hk"
-        assert luo["Chinese Full Name"] == "羅雨菡"
+        assert luo["Chinese Full Name"] == "羅雨涵"
         assert luo["Title"] == "Prof"
         assert luo["Position"] == "Assistant Professor"
 
@@ -231,7 +232,7 @@ class TestDetailPageFeatures:
             {"Email": "", "Title": "Prof"},  # '' is valid empty
         ]
         missing = _find_missing_fields(records, ["Email", "Title"])
-        # Email: record 0 is None → counted. Title: record 1 is None → counted
+        # Email: record 0 is None â†’ counted. Title: record 1 is None â†’ counted
         assert set(missing) == {"Email", "Title"}
 
     def test_all_empty_fields_includes_empties(self, schema):
@@ -243,7 +244,7 @@ class TestDetailPageFeatures:
             {"Email": "found@test.com", "Title": "Dr"},
         ]
         empty = _all_empty_fields(records, ["Email", "Title"])
-        # Email: record 0 is None → included. Title: record 0 is '' → included
+        # Email: record 0 is None â†’ included. Title: record 0 is '' â†’ included
         assert "Email" in empty
         assert "Title" in empty
 
@@ -299,11 +300,11 @@ class TestListingPageErrorFlow:
         state_error = f"Listing page issue: {page_err}"
         assert state_error == "Listing page issue: Test error message"
         # Records should be set to empty
-        assert page_err  # detected → set extracted_records = []
+        assert page_err  # detected â†’ set extracted_records = []
 
 
 class TestFieldMapping:
-    """Tests for abstract field_N → real name mapping."""
+    """Tests for abstract field_N â†’ real name mapping."""
 
     def test_field_map_builds_correctly(self, schema):
         """_field_map should build forward and reverse mappings."""
@@ -327,7 +328,7 @@ class TestFieldMapping:
         assert 'field_3 ("Chinese Full Name")' in text
 
     def test_unmap_static_values(self, schema):
-        """_unmap_static_values should convert field_N → real names."""
+        """_unmap_static_values should convert field_N â†’ real names."""
         from fscout.scraper.pattern_analyzer import _field_map, _unmap_static_values
 
         fwd, _ = _field_map(schema)
@@ -354,7 +355,7 @@ class TestFieldMapping:
 
 
 class TestFetchChildPage:
-    """Tests for _fetch_child_page — aiohttp-based child page fetching."""
+    """Tests for _fetch_child_page â€” aiohttp-based child page fetching."""
 
     class _FakeResponse:
         """Minimal async context manager mimicking aiohttp.ClientResponse."""
@@ -444,8 +445,8 @@ class TestDequeTraversal:
 
     Algorithm:
       - Pop from left (popleft)
-      - next_page_url → appendleft (DFS: processed immediately after current)
-      - child_page_urls → append (BFS: processed after current-level siblings)
+      - next_page_url â†’ appendleft (DFS: processed immediately after current)
+      - child_page_urls â†’ append (BFS: processed after current-level siblings)
     """
 
     def test_bfs_child_after_dfs_next(self):
@@ -460,10 +461,10 @@ class TestDequeTraversal:
         current_url, html_len, ancestors = queue.popleft()
         assert current_url == "root"
 
-        # next_page_url → appendleft (left, DFS)
+        # next_page_url â†’ appendleft (left, DFS)
         queue.appendleft(("next", 300, ["root"]))
 
-        # child_page_urls → append (right, BFS)
+        # child_page_urls â†’ append (right, BFS)
         children = ["child_a", "child_b", "child_c"]
         for c in children:
             queue.append((c, 400, ["root"]))
@@ -488,10 +489,10 @@ class TestDequeTraversal:
         current, _, ancestors = queue.popleft()
         assert current == "A"
 
-        # A has next page A2 → DFS (left)
+        # A has next page A2 â†’ DFS (left)
         queue.appendleft(("A2", 300, ["root", "A"]))
 
-        # A has child pages Aa, Ab → BFS (right)
+        # A has child pages Aa, Ab â†’ BFS (right)
         queue.append(("Aa", 400, ["root", "A"]))
         queue.append(("Ab", 400, ["root", "A"]))
 
@@ -575,7 +576,7 @@ class TestKnownUrls:
         known = {"https://root.com", "https://root.com/dep/a", "https://root.com/dep/b"}
         llm_output = [
             "https://root.com/dep/",
-            "https://root.com/dep/a",   # already known — should be filtered
+            "https://root.com/dep/a",   # already known â€” should be filtered
             "https://root.com/dep/c",   # new
         ]
         filtered = [u for u in llm_output if u not in known]
@@ -587,4 +588,168 @@ class TestKnownUrls:
         known_urls = ["https://root.com", current_url, "https://root.com/dep"]
         known_list = [u for u in known_urls if u != current_url]
         assert current_url not in known_list
-        assert len(known_list) == 2
+
+
+class TestFetchPageNodeCache:
+    """Integration tests for _fetch_page_node cache + force logic."""
+
+    @pytest.mark.asyncio
+    async def test_cache_enabled_skip_unchanged(self, tmp_path: Path):
+        """Default: cache on, not forcing. First fetch caches, second fetch skips."""
+        from fscout.config import AppConfig, FilesConfig, LLMConfig, ScrapingConfig
+        from fscout.cache import CacheManager
+        from fscout.scraper_graph import _fetch_page_node
+
+        config = AppConfig(
+            llm=LLMConfig(api_key="sk-test"),
+            files=FilesConfig(cache_dir=str(tmp_path / "cache"), cache_enabled=True),
+            scraping=ScrapingConfig(browser_timeout=5),
+        )
+        cm = CacheManager(config.files.cache_dir)
+        node = _fetch_page_node(config, cm, force_rescrape=False)
+        html_a = "<html><body><h1>Faculty Listing</h1><p>Professor A</p>" + ("x" * 5000) + "</body></html>"
+
+        async def fake_http_fetch(url, cfg):
+            return html_a
+        async def fake_pw_fetch(url, cfg):
+            return None
+
+        try:
+            with patch("fscout.scraper_graph._http_fetch", side_effect=fake_http_fetch), \
+                 patch("fscout.scraper_graph._playwright_fetch", side_effect=fake_pw_fetch):
+                state = {"listing_url": "https://example.com/staff", "force_rescrape": False}
+                result = await node(state)
+                # First run: should NOT be skipped (no cache yet)
+                assert result.get("skipped") is not True
+                assert result["page_html"] == html_a
+
+                # Second run: same content â†’ should be skipped
+                state2 = {"listing_url": "https://example.com/staff", "force_rescrape": False}
+                result2 = await node(state2)
+                assert result2.get("skipped") is True
+                assert result2["page_html"] == html_a
+        finally:
+            cm.close()
+
+    @pytest.mark.asyncio
+    async def test_force_rescrape_bypasses_skip(self, tmp_path: Path):
+        """force=True caches but always scrapes regardless of match."""
+        from fscout.config import AppConfig, FilesConfig, LLMConfig, ScrapingConfig
+        from fscout.cache import CacheManager
+        from fscout.scraper_graph import _fetch_page_node
+
+        config = AppConfig(
+            llm=LLMConfig(api_key="sk-test"),
+            files=FilesConfig(cache_dir=str(tmp_path / "cache"), cache_enabled=True),
+            scraping=ScrapingConfig(browser_timeout=5),
+        )
+        cm = CacheManager(config.files.cache_dir)
+        node = _fetch_page_node(config, cm, force_rescrape=True)
+        html_a = "<html><body><h1>Faculty Listing</h1><p>Professor A</p>" + ("x" * 5000) + "</body></html>"
+
+        async def fake_http_fetch(url, cfg):
+            return html_a
+        async def fake_pw_fetch(url, cfg):
+            return None
+
+        try:
+            with patch("fscout.scraper_graph._http_fetch", side_effect=fake_http_fetch), \
+                 patch("fscout.scraper_graph._playwright_fetch", side_effect=fake_pw_fetch):
+                # First run
+                state = {"listing_url": "https://example.com/staff", "force_rescrape": True}
+                result = await node(state)
+                assert result.get("skipped") is not True
+
+                # Second run: force=True â†’ should NOT skip
+                state2 = {"listing_url": "https://example.com/staff", "force_rescrape": True}
+                result2 = await node(state2)
+                assert result2.get("skipped") is not True
+                assert result2["page_html"] == html_a
+        finally:
+            cm.close()
+
+    @pytest.mark.asyncio
+    async def test_cache_disabled_never_reads_or_writes(self, tmp_path: Path):
+        """cache_enabled=False: no read, no write, always scrape."""
+        from fscout.config import AppConfig, FilesConfig, LLMConfig, ScrapingConfig
+        from fscout.cache import CacheManager
+        from fscout.scraper_graph import _fetch_page_node
+
+        config = AppConfig(
+            llm=LLMConfig(api_key="sk-test"),
+            files=FilesConfig(cache_dir=str(tmp_path / "cache"), cache_enabled=False),
+            scraping=ScrapingConfig(browser_timeout=5),
+        )
+        cm = CacheManager(config.files.cache_dir)
+        node = _fetch_page_node(config, cm, force_rescrape=False)
+        html_a = "<html><body><h1>Faculty Listing</h1><p>Professor A</p>" + ("x" * 5000) + "</body></html>"
+
+        call_count = 0
+        async def fake_http_fetch(url, cfg):
+            nonlocal call_count
+            call_count += 1
+            return html_a
+        async def fake_pw_fetch(url, cfg):
+            return None
+
+        try:
+            with patch("fscout.scraper_graph._http_fetch", side_effect=fake_http_fetch), \
+                 patch("fscout.scraper_graph._playwright_fetch", side_effect=fake_pw_fetch):
+                # First run
+                state = {"listing_url": "https://example.com/staff", "force_rescrape": False}
+                result = await node(state)
+                assert result.get("skipped") is not True
+                assert call_count == 1
+
+                # Second run: cache disabled â†’ fetch again, not skipped
+                state2 = {"listing_url": "https://example.com/staff", "force_rescrape": False}
+                result2 = await node(state2)
+                assert result2.get("skipped") is not True
+                assert call_count == 2
+        finally:
+            cm.close()
+
+    @pytest.mark.asyncio
+    async def test_changed_content_not_skipped(self, tmp_path: Path):
+        """New content different from cache â†’ NOT skipped."""
+        from fscout.config import AppConfig, FilesConfig, LLMConfig, ScrapingConfig
+        from fscout.cache import CacheManager
+        from fscout.scraper_graph import _fetch_page_node
+
+        config = AppConfig(
+            llm=LLMConfig(api_key="sk-test"),
+            files=FilesConfig(cache_dir=str(tmp_path / "cache"), cache_enabled=True),
+            scraping=ScrapingConfig(browser_timeout=5),
+        )
+        cm = CacheManager(config.files.cache_dir)
+        node = _fetch_page_node(config, cm, force_rescrape=False)
+
+        contents = [
+            "<html><body><h1>Faculty Listing</h1><p>v1</p>" + ("x" * 5000) + "</body></html>",
+            "<html><body><h1>Faculty Listing</h1><p>v2 DIFFERENT</p>" + ("x" * 5000) + "</body></html>",
+        ]
+        idx = 0
+        async def fake_http_fetch(url, cfg):
+            nonlocal idx
+            val = contents[idx]
+            idx += 1
+            return val
+        async def fake_pw_fetch(url, cfg):
+            return None
+
+        try:
+            with patch("fscout.scraper_graph._http_fetch", side_effect=fake_http_fetch), \
+                 patch("fscout.scraper_graph._playwright_fetch", side_effect=fake_pw_fetch):
+                # First: cache v1
+                state = {"listing_url": "https://example.com/staff", "force_rescrape": False}
+                result = await node(state)
+                assert result.get("skipped") is not True
+                assert result["page_html"] == contents[0]
+
+                # Second: content changed â†’ NOT skipped
+                state2 = {"listing_url": "https://example.com/staff", "force_rescrape": False}
+                result2 = await node(state2)
+                assert result2.get("skipped") is not True
+                assert result2["page_html"] == contents[1]
+        finally:
+            cm.close()

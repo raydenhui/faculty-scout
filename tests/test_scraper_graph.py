@@ -62,3 +62,76 @@ class TestGraphConstruction:
             assert hasattr(graph, "ainvoke")
         finally:
             cm.close()
+
+
+class TestCacheIntegration:
+    def test_cache_set_and_get(self, tmp_path: Path) -> None:
+        cm = CacheManager(tmp_path / "cache")
+        try:
+            url = "https://example.com/faculty"
+            content = "<html>test page</html>"
+            cm.set_url_content(url, content, ttl_sec=None)
+            cached = cm.get_url_content(url)
+            assert cached == content
+        finally:
+            cm.close()
+
+    def test_cache_returns_none_on_miss(self, tmp_path: Path) -> None:
+        cm = CacheManager(tmp_path / "cache")
+        try:
+            cached = cm.get_url_content("https://not-cached.com")
+            assert cached is None
+        finally:
+            cm.close()
+
+    def test_cache_separate_urls(self, tmp_path: Path) -> None:
+        cm = CacheManager(tmp_path / "cache")
+        try:
+            cm.set_url_content("https://a.com", "content A", ttl_sec=None)
+            cm.set_url_content("https://b.com", "content B", ttl_sec=None)
+            assert cm.get_url_content("https://a.com") == "content A"
+            assert cm.get_url_content("https://b.com") == "content B"
+        finally:
+            cm.close()
+
+    def test_cache_overwrite(self, tmp_path: Path) -> None:
+        cm = CacheManager(tmp_path / "cache")
+        try:
+            cm.set_url_content("https://x.com", "old", ttl_sec=None)
+            cm.set_url_content("https://x.com", "new", ttl_sec=None)
+            assert cm.get_url_content("https://x.com") == "new"
+        finally:
+            cm.close()
+
+    def test_build_graph_with_force_rescrape(self, tmp_path: Path) -> None:
+        config = AppConfig(llm=LLMConfig(api_key="sk-test-key"))
+        schema = Schema(columns=[ColumnDef(name="Name", type="extracted")])
+        llm = get_llm(config.llm)
+        cm = CacheManager(tmp_path / "cache")
+        try:
+            graph = build_agent_graph(config, schema, llm, cm, force_rescrape=True)
+            assert graph is not None
+        finally:
+            cm.close()
+
+
+class TestConfigCacheFields:
+    def test_cache_enabled_default(self) -> None:
+        from fscout.config import FilesConfig
+        fc = FilesConfig()
+        assert fc.cache_enabled is True
+
+    def test_cache_enabled_false(self) -> None:
+        from fscout.config import FilesConfig
+        fc = FilesConfig(cache_enabled=False)
+        assert fc.cache_enabled is False
+
+    def test_no_cache_ttl_field(self) -> None:
+        from fscout.config import FilesConfig
+        fc = FilesConfig()
+        assert not hasattr(fc, "cache_ttl_url")
+
+    def test_cache_dir_default(self) -> None:
+        from fscout.config import FilesConfig
+        fc = FilesConfig()
+        assert fc.cache_dir == "./cache"

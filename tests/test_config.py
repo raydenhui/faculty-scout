@@ -16,7 +16,7 @@ class TestAppConfig:
         assert cfg.version == 2
         assert cfg.llm.provider == "openai_compatible"
         assert cfg.scraping.headless is True
-        assert cfg.output.unique_keys == ["Email", "English Full Name"]
+        assert cfg.department.discovery_enabled is True
 
     def test_invalid_version_rejected(self) -> None:
         with pytest.raises(ValidationError):

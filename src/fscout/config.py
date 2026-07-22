@@ -52,14 +52,8 @@ class FilesConfig(BaseModel):
     input_excel: str = "universities.xlsx"
     output_excel: str = "faculty_data.xlsx"
     schema_file: str = "schema.json"
-    database: str = "fscout.db"
     cache_dir: str = "./cache"
-    cache_ttl_url: int = 604800
-
-
-class OutputConfig(BaseModel):
-    unique_keys: list[str] = Field(default_factory=lambda: ["Email", "English Full Name"])
-    archive_after_not_found_runs: int = 3
+    cache_enabled: bool = True
 
 
 class DepartmentConfig(BaseModel):
@@ -72,7 +66,6 @@ class AppConfig(BaseModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     scraping: ScrapingConfig = Field(default_factory=ScrapingConfig)
     files: FilesConfig = Field(default_factory=FilesConfig)
-    output: OutputConfig = Field(default_factory=OutputConfig)
     department: DepartmentConfig = Field(default_factory=DepartmentConfig)
 
     @field_validator("version")

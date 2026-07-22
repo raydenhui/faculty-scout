@@ -49,18 +49,22 @@ def cli() -> None:
 
 @cli.command()
 @click.option("--config-path", default="config.yaml", help="Path to config file.")
-@click.option("--skip-unchanged", is_flag=True, default=False,
-              help="Skip jobs where listing page HTML is unchanged from last run.")
+@click.option("--force", is_flag=True, default=False,
+              help="Always re-scrape even if page content is unchanged.")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show info-level logs.")
 @click.option("--debug", is_flag=True, default=False, help="Show debug-level logs (implies -v).")
 @click.option("--json", "json_out", is_flag=True, default=False, help="Emit machine-readable JSON to stdout.")
-def run(config_path: str, skip_unchanged: bool, verbose: bool, debug: bool, json_out: bool) -> None:
-    """Run all pending scrape targets from the input Excel."""
+def run(config_path: str, force: bool, verbose: bool, debug: bool, json_out: bool) -> None:
+    """Run all pending scrape targets from the input Excel.
+
+    By default, pages whose HTML is unchanged from the previous run are skipped.
+    Use --force to always re-scrape regardless of cache.
+    """
     configure_logging(verbose=verbose, debug=debug)
     if json_out:
         from .agent_api import run as api_run
 
-        result = _run_async(api_run(config_path, skip_unchanged=skip_unchanged))
+        result = _run_async(api_run(config_path, force=force))
         _emit_json(result)
         return
 
@@ -71,7 +75,7 @@ def run(config_path: str, skip_unchanged: bool, verbose: bool, debug: bool, json
         try:
             from .pipeline import run_pipeline
 
-            summary = await run_pipeline(cfg, schema, cache, skip_unchanged=skip_unchanged)
+            summary = await run_pipeline(cfg, schema, cache, force=force)
             if summary["failed"] > 0:
                 sys.exit(1)
         finally:

@@ -4,7 +4,7 @@ llm:
   provider: openai_compatible            # openai, azure, anthropic, google, deepseek, local
   model: gpt-4-turbo-preview
   temperature: 0.2
-  max_tokens: 4096
+  max_tokens: 8192
   # For openai / openai_compatible (DeepSeek, local, etc.)
   base_url: ""                          # e.g., https://api.deepseek.com/v1
   api_key: ${OPENAI_API_KEY}            # use env var
@@ -27,13 +27,8 @@ files:
   input_excel: "universities.xlsx"
   output_excel: "faculty_data.xlsx"
   schema_file: "schema.json"
-  database: "fscout.db"
   cache_dir: "./cache"
-  cache_ttl_url: 604800       # URL content cache TTL in seconds (7 days)
-
-output:
-  unique_keys: ["Email", "English Full Name"]   # used for identity matching
-  archive_after_not_found_runs: 3
+  cache_enabled: true            # Set to false to disable caching entirely
 
 department:
   discovery_enabled: true                # allow university-only entries

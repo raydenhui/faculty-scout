@@ -146,13 +146,13 @@ async def run_pipeline(
     config: AppConfig,
     schema: Schema,
     cache: CacheManager,
-    skip_unchanged: bool = False,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Run all pending targets and export results incrementally. Returns summary dict."""
     llm = get_llm(config.llm)
     console = Console()
-    log.info("pipeline start  provider=%s model=%s skip_unchanged=%s",
-             config.llm.provider, config.llm.model, skip_unchanged)
+    log.info("pipeline start  provider=%s model=%s force=%s",
+             config.llm.provider, config.llm.model, force)
 
     console.print("[bold blue]Pipeline[/] Loading input from Excel...")
     targets = read_targets(config.files.input_excel)
@@ -163,7 +163,7 @@ async def run_pipeline(
         return {"total": 0, "successful": 0, "failed": 0, "skipped": 0}
 
     agent = build_agent_graph(config, schema, llm, cache, checkpointer=None,
-                              skip_unchanged=skip_unchanged)
+                              force_rescrape=force)
 
     # ---- Discovery phase ----
     discovery_count = 0
@@ -235,7 +235,7 @@ async def run_pipeline(
                         "department": t["department"],
                         "need_discovery": False,
                         "listing_url": t["link"],
-                        "skip_unchanged": skip_unchanged,
+                        "force_rescrape": force,
                     }
                     result = await agent.ainvoke(state)
                     scraper_graph._progress_callback = None
