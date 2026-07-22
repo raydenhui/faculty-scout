@@ -473,11 +473,16 @@ def _fetch_page_node(
             cache.set_url_content(url, html, ttl_sec=None)
 
         # ---- skip scrape if content is unchanged (default behaviour) ----
-        if cache_on and not force and cached and cached == html:
+        # Normalize line endings before comparison — servers may return \r\n
+        # inconsistently across fetches.
+        if cache_on and not force and cached and _content_equals(cached, html):
             log.info("fetch_page SKIPPED url=%s (content unchanged, len=%d)", url, len(html))
             state["skipped"] = True
             state["page_html"] = html
             return state
+        if cache_on and not force and cached:
+            log.debug("fetch_page cache MISMATCH url=%s (cached=%d fetched=%d)",
+                       url, len(cached), len(html))
 
         log.debug("fetch_page OK len=%d", len(html))
         state["page_html"] = html
@@ -572,6 +577,21 @@ async def _playwright_fetch(url: str, config: AppConfig) -> str | None:
             if attempt == 0 and config.scraping.headless:
                 continue
     return None
+
+
+def _content_equals(a: str, b: str) -> bool:
+    """Compare HTML after normalizing inconsistent whitespace and line endings."""
+    if a == b:
+        return True
+
+    def _norm(s: str) -> str:
+        s = s.replace("\r\n", "\n").replace("\r", "\n")
+        s = re.sub(r"\n{2,}", "\n", s)
+        s = re.sub(r"[ \t]+\n", "\n", s)
+        s = re.sub(r"\n[ \t]+", "\n", s)
+        return s.strip()
+
+    return _norm(a) == _norm(b)
 
 
 def _has_content(html: str) -> bool:

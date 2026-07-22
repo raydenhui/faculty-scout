@@ -42,7 +42,7 @@ def configure(verbose: bool = False, debug: bool = False) -> None:
     # File handler for debug logs (debug.log)
     if debug:
         from pathlib import Path
-        fh = logging.FileHandler(Path("debug.log"), mode="w", encoding="utf-8")
+        fh = logging.FileHandler(Path("debug.log"), mode="a", encoding="utf-8")
         fh.setFormatter(logging.Formatter(LOG_FORMAT_VERBOSE, datefmt="%Y-%m-%d %H:%M:%S"))
         fh.setLevel(logging.DEBUG)
         root.addHandler(fh)

@@ -146,16 +146,21 @@ def _has_existing_records(output_path: str | Path, university: str, department: 
     """Check if the output Excel already has records for a source_key."""
     path = Path(output_path)
     if not path.exists():
+        log.debug("_has_existing_records: file not found: %s", path)
         return False
     try:
         df = pd.read_excel(path, sheet_name=0)
         if _SOURCE_KEY_HEADER not in df.columns:
-            return True  # old format without _source_key — treat as existing
+            log.debug("_has_existing_records: no _source_key column, assuming existing")
+            return True
         target_key = f"{department}/{university}"
         col = df[_SOURCE_KEY_HEADER].astype(str)
-        return bool((col.str.strip() == target_key).any())
+        exists = bool((col.str.strip() == target_key).any())
+        log.debug("_has_existing_records: target=%s exists=%s", target_key, exists)
+        return exists
     except Exception:
-        return True  # on error, assume records exist (safe — won't force)
+        log.debug("_has_existing_records: error reading Excel, assuming existing", exc_info=True)
+        return True
 
 
 async def run_pipeline(
