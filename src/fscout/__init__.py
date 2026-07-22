@@ -27,9 +27,9 @@ def _suppress_closed_pipe(hook_args):
 
 sys.unraisablehook = _suppress_closed_pipe
 
-from .config import AppConfig, load_config, mask_secrets
-from .database import Database
-from .schema import Schema, load_schema
+from .config import AppConfig, load_config, mask_secrets  # noqa: E402
+from .database import Database  # noqa: E402
+from .schema import Schema, load_schema  # noqa: E402
 
 __all__ = [
     "AppConfig",

@@ -31,10 +31,7 @@ _BLOCKED_TITLE_RE = re.compile(r"403|forbidden|just a moment", re.IGNORECASE)
 
 
 async def visit_detail_pages(
-    listing_html: str,
-    listing_url: str,
     records: list[dict[str, str]],
-    analysis: dict[str, Any],
     field_names: list[str],
     schema: Schema,
     llm: BaseChatModel,
@@ -71,16 +68,20 @@ async def visit_detail_pages(
 
     total_errors = 0
     error_lock = asyncio.Lock()
-    abort_event = asyncio.Event()  # Fix #1: hard stop via event
+    abort_event = asyncio.Event()
     sem = asyncio.Semaphore(MAX_CONCURRENT)
 
-    # Fix #9: Shared browser for the entire batch
     shared_browser: Any = None
     shared_playwright: Any = None
+    _browser_lock = asyncio.Lock()
 
     async def _get_browser() -> Any:
         nonlocal shared_browser, shared_playwright
-        if shared_browser is None:
+        if shared_browser is not None:
+            return shared_browser
+        async with _browser_lock:
+            if shared_browser is not None:
+                return shared_browser
             from playwright.async_api import async_playwright
             shared_playwright = await async_playwright().__aenter__()
             shared_browser = await shared_playwright.chromium.launch(
@@ -322,18 +323,16 @@ async def _fetch_one_url(
 async def _playwright_fetch(
     url: str, config: AppConfig, get_browser: Any = None,
 ) -> str | None:
-    # Fix #9: optionally receives a shared browser factory; creates pages, not new browsers
     for attempt in range(2):
         headless = config.scraping.headless and attempt == 0
         own_pw: Any = None
+        own_browser = False
         try:
             if get_browser is not None:
-                browser = await get_browser()
-                if headless != config.scraping.headless:
-                    with contextlib.suppress(Exception):
-                        await browser.close()
-                    browser = None
-            if get_browser is None or browser is None:
+                # Use shared browser only if headless mode matches
+                if headless == config.scraping.headless:
+                    browser = await get_browser()
+            if get_browser is None or 'browser' not in locals() or browser is None:
                 from playwright.async_api import async_playwright
                 own_pw = await async_playwright().__aenter__()
                 browser = await own_pw.chromium.launch(
@@ -343,6 +342,7 @@ async def _playwright_fetch(
                         "--no-sandbox",
                     ] if headless else [],
                 )
+                own_browser = True
 
             context = await browser.new_context(
                 user_agent=(
@@ -353,56 +353,57 @@ async def _playwright_fetch(
                 viewport={"width": 1280, "height": 900},
                 locale="en-US",
             )
-            page = await context.new_page()
             try:
-                response = await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
-                                           wait_until="domcontentloaded")
-                http_status = response.status if response else 0
-                if http_status in (404, 410):
-                    log.debug("_playwright_fetch HTTP %d, skipping: %s", http_status, url)
-                    return None
-                if http_status >= 500:
-                    log.debug("_playwright_fetch HTTP %d server error, skipping: %s", http_status, url)
-                    return None
+                page = await context.new_page()
+                try:
+                    response = await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
+                                               wait_until="domcontentloaded")
+                    http_status = response.status if response else 0
+                    if http_status in (404, 410):
+                        log.debug("_playwright_fetch HTTP %d, skipping: %s", http_status, url)
+                        return None
+                    if http_status >= 500:
+                        log.debug("_playwright_fetch HTTP %d server error, skipping: %s", http_status, url)
+                        return None
 
-                content_selectors = [
-                    "tr[class]", "div[class*='people']", "div[class*='staff']",
-                    "div[class*='person']", "div[class*='profile']", ".member",
-                    "li[class]", "table[class]", "*[data-member]", "a[href*='mailto']",
-                ]
-                for sel in content_selectors:
-                    try:
-                        await page.wait_for_selector(sel, timeout=5_000)
-                        break
-                    except Exception:
-                        continue
-                else:
-                    with contextlib.suppress(Exception):
-                        await page.wait_for_load_state("networkidle", timeout=8_000)
-                    await asyncio.sleep(3)
-                await asyncio.sleep(2)
-                html = await page.content()
-                if not _is_blocked_html(html):
-                    return html
-                if attempt == 0 and headless:
-                    continue
-                return None
-            finally:
-                await context.close()
-                if get_browser is None:
-                    await browser.close()
-                    if own_pw is not None:
+                    content_selectors = [
+                        "tr[class]", "div[class*='people']", "div[class*='staff']",
+                        "div[class*='person']", "div[class*='profile']", ".member",
+                        "li[class]", "table[class]", "*[data-member]", "a[href*='mailto']",
+                    ]
+                    for sel in content_selectors:
+                        try:
+                            await page.wait_for_selector(sel, timeout=5_000)
+                            break
+                        except Exception:
+                            continue
+                    else:
                         with contextlib.suppress(Exception):
-                            await own_pw.__aexit__(None, None, None)
+                            await page.wait_for_load_state("networkidle", timeout=8_000)
+                        await asyncio.sleep(3)
+                    await asyncio.sleep(2)
+                    html = await page.content()
+                    if not _is_blocked_html(html):
+                        return html
+                    if attempt == 0 and headless:
+                        continue
+                    return None
+                finally:
+                    with contextlib.suppress(Exception):
+                        await page.close()
+            finally:
+                with contextlib.suppress(Exception):
+                    await context.close()
         except Exception:
             if attempt == 0 and config.scraping.headless:
+                continue
+        finally:
+            if own_browser:
+                with contextlib.suppress(Exception):
+                    await browser.close()
                 if own_pw is not None:
                     with contextlib.suppress(Exception):
                         await own_pw.__aexit__(None, None, None)
-                continue
-            if own_pw is not None:
-                with contextlib.suppress(Exception):
-                    await own_pw.__aexit__(None, None, None)
     return None
 
 

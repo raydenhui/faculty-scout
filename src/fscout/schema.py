@@ -46,7 +46,6 @@ class ColumnDef(BaseModel):
 
 class Schema(BaseModel):
     columns: list[ColumnDef] = Field(default_factory=list)
-    dedup_keys: list[str] = Field(default_factory=list)
 
     def extracted_columns(self) -> list[ColumnDef]:
         return [c for c in self.columns if c.is_extracted()]

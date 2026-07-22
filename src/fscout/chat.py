@@ -11,36 +11,26 @@ from rich.console import Console
 from rich.panel import Panel
 
 from .config import AppConfig
-from .database import Database
 from .schema import ColumnDef, Schema
 
 console = Console()
 
-_STYLE = Style.from_dict(
-    {
-        "prompt": "bold ansicyan",
-    }
-)
+_STYLE = Style.from_dict({"prompt": "bold ansicyan"})
 
 
 def _help_text() -> str:
     return """Available commands:
-  /list          List configured universities
-  /jobs          Show job statuses
+  /list          List configured universities from Excel
   /schema        Show current schema columns
   /add-col NAME TYPE [hint HINT] [formula FORMULA] [value VALUE] [value_from FIELD]
                  Add a column to schema.json
-  /export        Regenerate Excel from database
+  /export        Export Excel from output file
   /config        Show current config (secrets masked)
   /help          Show this help
   /exit, /quit   Exit chat"""
 
 
-async def run_chat(
-    config: AppConfig,
-    schema: Schema,
-    db: Database,
-) -> None:
+async def run_chat(config: AppConfig, schema: Schema) -> None:
     """Start the interactive chat REPL."""
     console.print(
         Panel.fit(
@@ -66,17 +56,12 @@ async def run_chat(
             continue
 
         if line.startswith("/"):
-            await _handle_command(line, config, schema, db)
+            await _handle_command(line, config, schema)
         else:
-            await _handle_natural_language(line, config, schema, db)
+            await _handle_natural_language(line, config, schema)
 
 
-async def _handle_command(
-    line: str,
-    config: AppConfig,
-    schema: Schema,
-    db: Database,
-) -> None:
+async def _handle_command(line: str, config: AppConfig, schema: Schema) -> None:
     parts = line.split()
     cmd = parts[0].lower()
 
@@ -87,29 +72,16 @@ async def _handle_command(
         console.print(_help_text())
 
     elif cmd == "/list":
-        rows = await db.get_input_universities()
-        if not rows:
+        from .pipeline import read_targets
+
+        targets = read_targets(config.files.input_excel)
+        if not targets:
             console.print("[yellow]No universities configured.[/]")
         else:
-            for r in rows:
-                dept = r["department"] or "[all departments]"
-                console.print(f"  • {r['university']} — {dept}")
-
-    elif cmd == "/jobs":
-        jobs = await db.list_jobs()
-        if not jobs:
-            console.print("[yellow]No jobs yet.[/]")
-        else:
-            status_colors = {
-                "completed": "green",
-                "running": "yellow",
-                "failed": "red",
-                "pending": "dim",
-            }
-            for j in jobs:
-                c = status_colors.get(j["status"], "white")
-                dept = j["department"] or "All"
-                console.print(f"  [{c}]●[/{c}] {j['university']}/{dept} [{c}]{j['status']}[/{c}]")
+            for t in targets:
+                dept = t["department"] or "[all departments]"
+                status = f" [{t['status']}]" if t.get("status") else ""
+                console.print(f"  • {t['university']} — {dept}{status}")
 
     elif cmd == "/schema":
         if not schema.columns:
@@ -131,14 +103,11 @@ async def _handle_command(
         await _add_column(parts[1:], schema, config)
 
     elif cmd == "/export":
-        from .exporter import export_to_excel
-
-        rows = await export_to_excel(db, schema, config.files.output_excel)
-        console.print(f"[green]Exported {rows} rows to {config.files.output_excel}[/]")
+        console.print(f"[yellow]Output file: {config.files.output_excel}[/]")
+        console.print("[dim]Run 'fscout export' or 'fscout run' to generate fresh output.[/]")
 
     elif cmd == "/config":
         from .config import mask_secrets
-
         console.print_json(json.dumps(mask_secrets(config)))
 
     else:
@@ -180,64 +149,31 @@ async def _add_column(args: list[str], schema: Schema, config: AppConfig) -> Non
         else:
             i += 1
 
-    col = ColumnDef(
-        name=name, type=col_type, hint=hint, formula=formula, value=value, value_from=value_from
-    )
+    col = ColumnDef(name=name, type=col_type, hint=hint, formula=formula, value=value, value_from=value_from)
     schema.columns.append(col)
 
     from pathlib import Path
-
     path = Path(config.files.schema_file)
-    path.write_text(
-        schema.model_dump_json(indent=2),
-        encoding="utf-8",
-    )
-
+    path.write_text(schema.model_dump_json(indent=2), encoding="utf-8")
     console.print(f"[green]Added column '{name}' ({col_type}) to {path}[/]")
 
 
-async def _handle_natural_language(
-    text: str,
-    config: AppConfig,
-    schema: Schema,
-    db: Database,
-) -> None:
-    """Basic natural language command parsing."""
+async def _handle_natural_language(text: str, config: AppConfig, schema: Schema) -> None:
     text_lower = text.lower().strip()
 
-    if "add university" in text_lower:
-        import re
+    if "list universit" in text_lower:
+        from .pipeline import read_targets
 
-        match = re.search(r"add university\s+(.+)", text_lower)
-        if match:
-            rest = match.group(1).strip()
-            parts = rest.split(",")
-            uni = parts[0].strip()
-            dept = parts[1].strip() if len(parts) > 1 else None
-            await db.upsert_input_university(uni, dept)
-            console.print(f"[green]Added university: {uni}{' (' + dept + ')' if dept else ''}[/]")
+        targets = read_targets(config.files.input_excel)
+        for t in targets:
+            dept = t["department"] or "[all]"
+            console.print(f"  • {t['university']} — {dept}")
 
-    elif "list universit" in text_lower:
-        rows = await db.get_input_universities()
-        for r in rows:
-            dept = r["department"] or "[all]"
-            console.print(f"  • {r['university']} — {dept}")
+    elif any(w in text_lower for w in ("export", "results", "data")):
+        console.print(f"[yellow]Output file is {config.files.output_excel}. Run 'fscout run' to scrape fresh data.[/]")
 
-    elif "job status" in text_lower or "show jobs" in text_lower:
-        jobs = await db.list_jobs()
-        if not jobs:
-            console.print("[yellow]No jobs yet.[/]")
-        else:
-            for j in jobs:
-                dept = j["department"] or "All"
-                console.print(f"  {j['university']}/{dept} [{j['status']}]")
-
-    elif "show config" in text_lower:
-        from .config import mask_secrets
-
-        console.print_json(json.dumps(mask_secrets(config)))
+    elif "schema" in text_lower:
+        console.print(f"[dim]Schema file: {config.files.schema_file}. Use /schema to view, /add-col to add.[/]")
 
     else:
-        console.print(
-            "[dim]I didn't understand that. Try using slash commands like /help for available options.[/]"
-        )
+        console.print("[dim]Type /help for available commands.[/]")

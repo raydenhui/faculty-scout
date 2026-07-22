@@ -19,7 +19,6 @@ class TestCLI:
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
         assert "run" in result.output
-        assert "resume" in result.output
         assert "export" in result.output
         assert "chat" in result.output
 

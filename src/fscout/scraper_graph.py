@@ -682,8 +682,8 @@ async def _run_scraper_impl(
 
     try:
         records = await scrape(url, html, schema, llm, config, progress_callback=progress_callback)
+        state["page_html"] = ""
 
-        # Check for page-level error detected by LLM
         if records and len(records) == 1 and isinstance(records[0], dict):
             page_err = records[0].get("_page_error")
             if page_err:

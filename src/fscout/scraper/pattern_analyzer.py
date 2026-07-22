@@ -106,6 +106,15 @@ async def analyze_listing_page(
             f"  {i}. {u}" for i, u in enumerate(ancestor_urls, 1)
         ) + "\n"
 
+    ancestor_hint = ""
+    if ancestor_urls:
+        last = ancestor_urls[-1]
+        ancestor_hint = (
+            f"This page was reached from parent: {last}\n"
+            f"If the parent is a school/faculty-wide page, this page is likely a department under that school.\n"
+            f"If the parent is a department page, this page is likely a sub-division of that department.\n"
+        )
+
     known_text = ""
     if known_urls:
         known_list = [u for u in known_urls if u != url]
@@ -120,7 +129,7 @@ async def analyze_listing_page(
     prompt = f"""Extract ALL academic faculty members from this listing page HTML.
 
 URL: {url}
-{ancestor_text}{known_text}Fields to extract per person (use the abstract field_* keys):
+{ancestor_hint}{ancestor_text}{known_text}Fields to extract per person (use the abstract field_* keys):
 {field_list}
 {static_info}
 
@@ -156,22 +165,24 @@ Otherwise, omit the "error" field.
 PAGINATION RULES — two separate fields below:
 
 next_page_url — sequential continuation of the CURRENT listing:
-- If the listing has a "next page" link, include ONLY the IMMEDIATE next page URL.
-  Do NOT enumerate all future pages — just the very next one.
+- If the listing has a "next page" link (numbered: page 1→2→3, or alphabetical: A→B→C),
+  include ONLY the IMMEDIATE next page URL. Do NOT enumerate all future pages.
   Example: on /faculty?page=1, set next_page_url to ".../faculty?page=2" (not page=3).
   Example: on /faculty/A/, set next_page_url to ".../faculty/B/" (not /C/).
 - If this is the last page or pagination does not exist, set next_page_url to "".
 
-child_page_urls — separate sibling/category listing pages:
-- These are DIFFERENT listing pages at the SAME level (e.g., separate department pages).
-- Include ALL sibling category/department sub-pages that contain faculty listings.
-- Include alphabet index pages ONLY if they appear as parallel sibling links (not "next").
-  Example: [".../cs/faculty", ".../math/faculty", ".../physics/faculty"]
-
-CRITICAL — URL relevance filter:
-- ONLY include URLs that clearly belong to the same faculty/staff listing system
-  (same website section, same navigation structure, same domain path prefix).
-- Every URL MUST be a page that continues listing faculty members.
+child_page_urls — sub-pages ONE level DOWN in the hierarchy:
+- HIERARCHY RULE — only go DOWN, never sideways:
+  * If this page is a SCHOOL/FACULTY listing → child_page_urls may contain department pages
+    that belong UNDER this school (e.g., /engineering/cs/, /engineering/ee/).
+    Do NOT include departments of OTHER schools.
+  * If this page is a DEPARTMENT listing → child_page_urls may only contain sub-divisions
+    within THIS department (e.g., research areas, labs, program tracks).
+    Do NOT include OTHER departments — those are siblings, not children.
+  * If there are no sub-pages one level down, set child_page_urls to [].
+- Do NOT include links to pages at the same hierarchical level as the current page
+  (no peer/sibling departments, no peer schools).
+- Every URL in child_page_urls MUST be a page that continues listing faculty members.
 - Do NOT include: homepages, contact pages, about pages, external websites,
   login pages, search pages, or generic university navigation links.
 - Do NOT include any URL listed in the "ALREADY DISCOVERED" section above.
