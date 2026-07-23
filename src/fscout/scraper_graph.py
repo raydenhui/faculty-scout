@@ -580,12 +580,29 @@ async def _playwright_fetch(url: str, config: AppConfig) -> str | None:
 
 
 def _content_equals(a: str, b: str) -> bool:
-    """Compare HTML after normalizing inconsistent whitespace and line endings."""
+    """Compare HTML after stripping dynamic content and normalizing whitespace.
+
+    JS-generated IDs, CSRF tokens, nonces, and cache busters are removed
+    before comparison so that only meaningful content changes (added/removed
+    faculty entries) trigger a re-scrape.
+    """
     if a == b:
         return True
 
+    # Patterns that carry no semantic meaning and change on every request:
+    _DYNAMIC_PATTERNS = [
+        (re.compile(r'\bid="[^"]*"'), ""),                          # id attributes
+        (re.compile(r'\bclass="[^"]*"'), ""),                       # class attributes
+        (re.compile(r'<script\b.*?</script>', re.DOTALL), ""),      # inline scripts
+        (re.compile(r'\bnonce="[^"]*"'), ""),                       # CSP nonces
+        (re.compile(r'\b_csrf[^=]*="[^"]*"'), ""),                  # CSRF tokens
+        (re.compile(r'(https?://[^\s"<>]*?)(\?[^\s"<>]*)'), r'\1'),  # strip query params
+    ]
+
     def _norm(s: str) -> str:
         s = s.replace("\r\n", "\n").replace("\r", "\n")
+        for pattern, replacement in _DYNAMIC_PATTERNS:
+            s = pattern.sub(replacement, s)
         s = re.sub(r"\n{2,}", "\n", s)
         s = re.sub(r"[ \t]+\n", "\n", s)
         s = re.sub(r"\n[ \t]+", "\n", s)
