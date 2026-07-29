@@ -250,10 +250,10 @@ await agent_api.export(fmt="json")
 
 ```bash
 pip install "faculty-scout[mcp]"
-fscout-mcp        # stdio transport
+python -m fscout.mcp_server            # stdio transport
+python -m fscout.mcp_server --sse      # HTTP/SSE transport (port 8000)
+python -m fscout.mcp_server --sse --port 9000  # custom port
 ```
-
-Exposed tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -264,3 +264,26 @@ Exposed tools:
 | `get_status` | Job statuses + summary |
 | `get_results` | Extracted faculty records (filterable) |
 | `export_results` | Export records to JSON/Excel |
+
+### Docker Deployment
+
+```bash
+docker compose up -d --build faculty-scout
+```
+
+The MCP server runs on `http://localhost:8000/sse` with auto-restart. Volume mounts for Excel files and cache. For n8n integration, add an MCP Client node pointing to `http://faculty-scout:8000/sse` (or `http://host.docker.internal:8000/sse` if n8n is on the host).
+
+### Configuration Reference
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `scraping.skip_children_if_records_ge` | `0` | Skip child pages if parent has ≥ N records (0=disabled) |
+
+Schema `dedup_keys` merge records with matching values after each department scrape:
+
+```json
+{
+  "columns": [...],
+  "dedup_keys": ["Email"]
+}
+```

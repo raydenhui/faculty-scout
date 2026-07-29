@@ -1,0 +1,12 @@
+cache/
+logs/
+debug.log
+llm_conversation.log
+*.xlsx
+*.egg-info
+__pycache__/
+*.pyc
+.git/
+update_hku_cache.py
+update_cache.py
+.env

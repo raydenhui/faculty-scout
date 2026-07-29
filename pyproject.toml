@@ -45,6 +45,7 @@ dev = [
 ]
 mcp = [
     "mcp>=1.0",
+    "fastmcp>=3.0",
 ]
 
 [project.scripts]

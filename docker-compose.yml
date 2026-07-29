@@ -1,0 +1,29 @@
+# ---- docker-compose snippet for faculty-scout ----
+# Merge into your existing n8n docker-compose.yml
+#
+# Startup:
+#   docker compose up -d --build faculty-scout
+#
+# n8n MCP Client config:
+#   URL: http://faculty-scout:8000/sse
+#
+
+services:
+  faculty-scout:
+    build: .
+    container_name: faculty-scout
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount your input/output Excel files and config
+      - ./universities.xlsx:/app/universities.xlsx
+      - ./faculty_data.xlsx:/app/faculty_data.xlsx
+      - ./config.yaml:/app/config.yaml
+      - ./schema.json:/app/schema.json
+      # Persist the cache across restarts
+      - scout_cache:/app/cache
+    command: ["python", "-m", "fscout.mcp_server", "--sse", "--host", "0.0.0.0"]
+
+volumes:
+  scout_cache:
