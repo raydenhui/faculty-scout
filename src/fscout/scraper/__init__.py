@@ -7,7 +7,6 @@ Detail pages are visited for any missing fields (null values).
 from __future__ import annotations
 
 import asyncio
-import re
 from collections import deque
 from typing import Any
 
@@ -28,110 +27,9 @@ MAX_CHILD_FETCH_CONCURRENT = 3
 
 
 async def _fetch_child_page(url: str, config: AppConfig) -> str | None:
-    """Fetch a child listing page. aiohttp first, Playwright fallback for JS pages."""
-    aiohttp_html: str | None = None
-    try:
-        import aiohttp
-        async with aiohttp.ClientSession() as session, session.get(
-            url,
-            timeout=aiohttp.ClientTimeout(total=min(config.scraping.browser_timeout, 15)),
-        ) as resp:
-            if resp.status == 200:
-                text = await resp.text()
-                if text and len(text) > 200:
-                    aiohttp_html = text
-    except Exception:
-        pass
-
-    if aiohttp_html and not _is_js_page(aiohttp_html):
-        return aiohttp_html
-
-    if aiohttp_html is not None:
-        log.debug("_fetch_child_page JS template detected, trying Playwright: %s", url)
-    else:
-        log.debug("_fetch_child_page aiohttp failed, trying Playwright: %s", url)
-
-    try:
-        from playwright.async_api import async_playwright
-
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-            )
-            context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/128.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 900},
-                locale="en-US",
-            )
-            page = await context.new_page()
-            try:
-                response = await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
-                                           wait_until="domcontentloaded")
-                http_status = response.status if response else 0
-                if http_status in (404, 410, 500, 502, 503):
-                    return None
-                await page.wait_for_load_state("networkidle", timeout=10_000)
-                await asyncio.sleep(2)
-                html = await page.content()
-                if html and len(html) > 200:
-                    return html
-            finally:
-                await browser.close()
-    except Exception:
-        pass
-    return None
-
-
-def _is_js_page(html: str) -> bool:
-    """Detect if HTML is a JS-rendered page that lacks structured content."""
-    snippet = html[:50_000]
-    indicators = [
-        "{{", "v-bind", "v-if", "v-for", "v-model",
-        "ng-app", "ng-controller", "ng-repeat",
-        "__vue__", "__vue_app__", "_reactRootContainer",
-        'data-reactroot', 'data-reactid',
-        '<div id="root">', '<div id="app">',
-    ]
-    for ind in indicators:
-        if ind in snippet:
-            return True
-
-    scripts = re.findall(r"<script[^>]*>.*?</script>", snippet, re.DOTALL | re.IGNORECASE)
-    api_patterns = ["/api/", "fetch(", "ajax(", "xmlhttp", "staff_data", "faculty_data",
-                    "person_data", "load_people", "get_people", "member_data"]
-    for s in scripts:
-        for pat in api_patterns:
-            if pat.lower() in s.lower():
-                return True
-
-    text = re.sub(r"<[^>]+>", " ", snippet)
-    has_faculty_words = any(t in text.lower() for t in [
-        "professor", "associate", "lecturer", "faculty",
-        "academic staff", "teaching staff", "staff directory",
-    ])
-    has_person_data = bool(re.search(
-        r'<table[^>]*>.*?<t[rd][^>]*>\s*(?:Prof\.|Dr\.|Professor)\s+[A-Z].*?</table>',
-        snippet, re.DOTALL | re.IGNORECASE,
-    )) or bool(re.search(
-        r'<li[^>]*>\s*(?:Prof\.|Dr\.|Professor)\s*[A-Z]',
-        snippet, re.IGNORECASE,
-    ))
-    email_count = len(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", snippet)))
-
-    if len(snippet) < 5000 and has_faculty_words:
-        return True
-
-    return bool(
-        has_faculty_words
-        and not has_person_data
-        and email_count < 3
-        and len(snippet) > 15000
-    )
+    """Fetch a child listing page using the shared fetch_fallback pipeline."""
+    from ..scraper_graph import fetch_page_html
+    return await fetch_page_html(url, config)
 
 
 async def scrape(
@@ -141,6 +39,7 @@ async def scrape(
     llm: BaseChatModel,
     config: AppConfig,
     progress_callback: Any = None,
+    cache: Any = None,
 ) -> list[dict[str, Any]]:
     """Extract faculty records from all listing pages using BFS+DFS traversal.
 
@@ -197,6 +96,24 @@ async def scrape(
         records = analysis_dict_to_records(analysis, field_names)
         all_records.extend(records)
         log.info("scrape page %d: %d records (total: %d)", page_num, len(records), len(all_records))
+
+        # ---- skip children if parent already has enough records ----
+        skip_threshold = config.scraping.skip_children_if_records_ge
+        if skip_threshold > 0 and len(records) >= skip_threshold and page_num == 1:
+            log.info("scrape page %d: %d records >= threshold %d, skipping child pages",
+                     page_num, len(records), skip_threshold)
+            if cache is not None and config.files.cache_enabled:
+                cache.set_subtree_urls(current_url, [])
+            continue
+
+        # ---- store subtree URLs in cache for future skip-unchanged checks ----
+        if cache is not None and config.files.cache_enabled:
+            subtree_urls: list[str] = []
+            if analysis.next_page_url:
+                subtree_urls.append(analysis.next_page_url)
+            subtree_urls.extend(cu for cu in analysis.child_page_urls if cu.strip().startswith("http"))
+            if subtree_urls:
+                cache.set_subtree_urls(current_url, subtree_urls)
 
         # ---- next_page_url: DFS — push to LEFT, processed immediately after current ----
         next_url = (analysis.next_page_url or "").strip()

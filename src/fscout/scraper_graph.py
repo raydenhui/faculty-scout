@@ -445,41 +445,32 @@ def _fetch_page_node(
 
         force = force_rescrape or state.get("force_rescrape", False)
         cache_on = config.files.cache_enabled
-        cached = cache.get_url_content(url) if cache_on else None
 
         log.info("fetch_page start url=%s force=%s cache=%s", url, force, cache_on)
 
-        # ---- fetch fresh content ----
-        html = await _http_fetch(url, config)
-        if html and _has_content(html) and not _is_js_template(html) and len(html) >= 5000:
-            log.debug("fetch_page http OK len=%d", len(html))
-        else:
-            if html and len(html) < 5000:
-                log.info("fetch_page HTTP response too short (%d bytes), trying Playwright...", len(html))
-            else:
-                log.info("fetch_page trying Playwright fallback...")
-            html = await _playwright_fetch(url, config)
+        html = await fetch_page_html(url, config)
 
         if not html:
             log.warning("fetch_page FAILED url=%s", url)
+            cached = cache.get_url_content(url) if cache_on else None
             if cached:
                 state["page_html"] = cached
             else:
                 state["page_html"] = None
             return state
 
-        # ---- always cache fresh content when cache is enabled ----
+        cached = cache.get_url_content(url) if cache_on else None
+
         if cache_on:
             cache.set_url_content(url, html, ttl_sec=None)
 
-        # ---- skip scrape if content is unchanged (default behaviour) ----
-        # Normalize line endings before comparison — servers may return \r\n
-        # inconsistently across fetches.
         if cache_on and not force and cached and _content_equals(cached, html):
-            log.info("fetch_page SKIPPED url=%s (content unchanged, len=%d)", url, len(html))
-            state["skipped"] = True
-            state["page_html"] = html
-            return state
+            if await _check_subtree_unchanged(cache, url, config):
+                log.info("fetch_page SKIPPED url=%s (content unchanged, len=%d)", url, len(html))
+                state["skipped"] = True
+                state["page_html"] = html
+                return state
+            log.info("fetch_page subtree changed url=%s (children differ, scraping)", url)
         if cache_on and not force and cached:
             log.debug("fetch_page cache MISMATCH url=%s (cached=%d fetched=%d)",
                        url, len(cached), len(html))
@@ -489,6 +480,18 @@ def _fetch_page_node(
         return state
 
     return _node
+
+
+async def fetch_page_html(url: str, config: AppConfig) -> str | None:
+    """Unified fetch: aiohttp first, Playwright fallback for JS pages.
+
+    Every part of the system that fetches page HTML MUST use this function
+    so that cached content comes from the same pipeline.
+    """
+    html = await _http_fetch(url, config)
+    if html and _has_content(html) and not _is_js_template(html) and len(html) >= 5000:
+        return html
+    return await _playwright_fetch(url, config)
 
 
 async def _http_fetch(url: str, config: AppConfig) -> str | None:
@@ -591,12 +594,23 @@ def _content_equals(a: str, b: str) -> bool:
 
     # Patterns that carry no semantic meaning and change on every request:
     _DYNAMIC_PATTERNS = [
-        (re.compile(r'\bid="[^"]*"'), ""),                          # id attributes
-        (re.compile(r'\bclass="[^"]*"'), ""),                       # class attributes
-        (re.compile(r'<script\b.*?</script>', re.DOTALL), ""),      # inline scripts
+        (re.compile(r'\bid=(?:"|&quot;)[^"&]*(?:"|&quot;)'), ""),   # id attributes
+        (re.compile(r'\bfor=(?:"|&quot;)[^"&]*(?:"|&quot;)'), ""),  # for attributes (label targets)
+        (re.compile(r'\bclass=(?:"|&quot;)[^"&]*(?:"|&quot;)'), ""),  # class attributes
+        (re.compile(r'\bname="[0-9a-f]{32}"'), 'name=""'),            # Joomla/random hex form tokens
+        (re.compile(r'<script\b.*?</script>', re.DOTALL), ""),        # inline scripts
         (re.compile(r'\bnonce="[^"]*"'), ""),                       # CSP nonces
         (re.compile(r'\b_csrf[^=]*="[^"]*"'), ""),                  # CSRF tokens
-        (re.compile(r'(https?://[^\s"<>]*?)(\?[^\s"<>]*)'), r'\1'),  # strip query params
+        (re.compile(r'"csrf\.token":\s*"[^"]*"'), ""),               # CSRF in JSON/JS
+        (re.compile(r'<meta\b[^>]*>'), ""),                         # ALL meta tags (CSRF, viewport, etc.)
+        (re.compile(r'data-[\w-]+="[^"]*"'), ""),                       # dynamic data attributes
+        (re.compile(r'href="([^"]*)\?[^"]*"'), r'href="\1"'),          # href URL cache busters
+        (re.compile(r'([^\s"<>?]+\.css)(\?[^\s"<>]*)'), r'\1'),       # CSS cache busters
+        (re.compile(r'_wpnonce[a-zA-Z0-9_]*'), '_wpnonce'),            # WordPress nonces
+        (re.compile(r'([^\s"<>?]+\.js)(\?[^\s"<>]*)'), r'\1'),      # JS cache busters
+        (re.compile(r'(https?://[^\s"<>]*?)(\?[^\s"<>]*)'), r'\1'),  # absolute URL query params
+        (re.compile(r'-\d{10,}'), "-0"),                             # random WordPress-style IDs
+        (re.compile(r'<a\s[^>]*href="mailto:[^"]*"[^>]*>.*?</a>'), ""),  # email obfuscation links
     ]
 
     def _norm(s: str) -> str:
@@ -611,6 +625,26 @@ def _content_equals(a: str, b: str) -> bool:
     return _norm(a) == _norm(b)
 
 
+async def _check_subtree_unchanged(cache: Any, url: str, config: AppConfig) -> bool:
+    """Fetch child pages and check if they have changed since last scrape.
+
+    Returns True if ALL children are unchanged (safe to skip).
+    Returns False if any child differs or if no subtree URLs exist yet
+    (the page may have children that haven't been discovered).
+    """
+    children = cache.get_subtree_urls(url)
+    if not children:
+        return True  # no child pages — safe to skip
+
+    for child_url in children:
+        cached_child = cache.get_url_content(child_url)
+        fresh = await fetch_page_html(child_url, config)
+        if not fresh or not cached_child or not _content_equals(cached_child, fresh):
+            return False
+        cache.set_url_content(child_url, fresh, ttl_sec=None)
+    return True
+
+
 def _has_content(html: str) -> bool:
     """Crude check: does the HTML contain enough text to be a listing page?"""
     text = re.sub(r"<[^>]+>", " ", html)
@@ -619,21 +653,18 @@ def _has_content(html: str) -> bool:
 
 def _is_js_template(html: str) -> bool:
     """Detect JS framework template HTML (Angular/Vue/React) that needs rendering."""
-    indicators = [
-        "{{",                       # Angular/Handlebars/Mustache
-        "v-bind", "v-if", "v-for", "v-model",  # Vue.js directives
-        "ng-app", "ng-controller", "ng-repeat", # AngularJS
-        '__vue__', '__vue_app__',               # Vue runtime
-        '_reactRootContainer',                  # React
-        'data-reactroot', 'data-reactid',       # React (legacy)
-        "<div id=\"root\">", "<div id=\"app\">" # Common SPAs
-    ]
     snippet = html[:50_000]
+    indicators = [
+        "{{", "v-bind", "v-if", "v-for", "v-model",
+        "ng-app", "ng-controller", "ng-repeat",
+        '__vue__', '__vue_app__', '_reactRootContainer',
+        'data-reactroot', 'data-reactid',
+        "<div id=\"root\">", "<div id=\"app\">",
+    ]
     for ind in indicators:
         if ind in snippet:
             return True
 
-    # Dynamic data loading: scripts contain AJAX/API/fetch calls for data
     scripts = re.findall(r"<script[^>]*>.*?</script>", snippet, re.DOTALL | re.IGNORECASE)
     api_patterns = ["/api/", "fetch(", "ajax(", "xmlhttp", "staff_data", "faculty_data",
                     "person_data", "load_people", "get_people", "member_data"]
@@ -642,31 +673,31 @@ def _is_js_template(html: str) -> bool:
             if pat.lower() in s.lower():
                 return True
 
-    # Content check: pages with faculty words but no structured person data
-    text = re.sub(r"<[^>]+>", " ", snippet)
+    # Check the full page for structured person data — first 50KB is often
+    # just <head> with CSS/JS, faculty content starts later.
+    text = re.sub(r"<[^>]+>", " ", html)
     has_faculty_words = any(t in text.lower() for t in ["professor", "associate", "lecturer",
                                                          "faculty", "academic staff", "teaching staff",
                                                          "staff directory"])
 
-    # Look for structured person data in HTML (tables, lists of people)
     has_person_table = bool(re.search(
-        r'<table[^>]*>.*?'                                      # table
-        r'<t[rd][^>]*>\s*(?:Prof\.|Dr\.|Professor)\s+[A-Z]'
-        r'.*?</table>',
-        snippet, re.DOTALL | re.IGNORECASE
+        r'<table[^>]*>.*?<t[rd][^>]*>\s*(?:Prof\.|Dr\.|Professor)\s+[A-Z].*?</table>',
+        html, re.DOTALL | re.IGNORECASE,
     ))
     has_person_list = bool(re.search(
         r'<li[^>]*>\s*(?:Prof\.|Dr\.|Professor)\s*[A-Z]',
-        snippet, re.IGNORECASE
+        html, re.IGNORECASE,
     ))
-    email_count = len(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", snippet)))
+    email_count = len(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", html)))
+
+    if not has_faculty_words:
+        return False
 
     return bool(
-        has_faculty_words
-        and not has_person_table
+        not has_person_table
         and not has_person_list
         and email_count < 3
-        and len(snippet) > 15000
+        and len(html) > 15000
     )
 
 
@@ -711,7 +742,8 @@ async def _run_scraper_impl(
     log.info("run_scraper start url=%s html_len=%d", url, len(html))
 
     try:
-        records = await scrape(url, html, schema, llm, config, progress_callback=progress_callback)
+        records = await scrape(url, html, schema, llm, config, cache=cache,
+                                progress_callback=progress_callback)
         state["page_html"] = ""
 
         if records and len(records) == 1 and isinstance(records[0], dict):

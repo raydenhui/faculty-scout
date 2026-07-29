@@ -46,6 +46,7 @@ class ScrapingConfig(BaseModel):
     max_concurrent_jobs: int = 3
     max_retries_per_step: int = 3
     request_delay_sec: float = 1.0
+    skip_children_if_records_ge: int = 0
 
 
 class FilesConfig(BaseModel):

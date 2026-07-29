@@ -42,5 +42,6 @@
       "type": "extracted",
       "hint": "Any additional information about the scraping process. If not available, leave blank."
     }
-  ]
+  ],
+  "dedup_keys": ["Email"]
 }

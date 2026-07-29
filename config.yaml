@@ -22,6 +22,7 @@ scraping:
   max_concurrent_jobs: 3
   max_retries_per_step: 3
   request_delay_sec: 1.0
+  skip_children_if_records_ge: 0  # skip child pages if parent has this many records (0=disabled)
 
 files:
   input_excel: "universities.xlsx"

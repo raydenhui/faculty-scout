@@ -392,12 +392,12 @@ class TestFetchChildPage:
         from fscout.scraper.__init__ import _fetch_child_page
 
         config = AppConfig(scraping=ScrapingConfig(browser_timeout=10))
-        resp = self._FakeResponse(200, "x" * 500)
+        resp = self._FakeResponse(200, "x" * 6000)
 
         with patch("aiohttp.ClientSession", return_value=self._FakeSession(resp)):
             result = await _fetch_child_page("https://example.com/faculty", config)
             assert result is not None
-            assert len(result) == 500
+            assert len(result) == 6000
 
     @pytest.mark.asyncio
     async def test_returns_none_on_non_200(self):
@@ -405,21 +405,22 @@ class TestFetchChildPage:
         from fscout.scraper.__init__ import _fetch_child_page
 
         config = AppConfig(scraping=ScrapingConfig(browser_timeout=10))
-        resp = self._FakeResponse(404, "x" * 500)
+        resp = self._FakeResponse(404, "x" * 6000)
 
         with patch("aiohttp.ClientSession", return_value=self._FakeSession(resp)):
             result = await _fetch_child_page("https://example.com/404", config)
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_returns_none_on_short_content(self):
+    async def test_returns_none_on_playwright_fallback(self):
         from fscout.config import AppConfig, ScrapingConfig
         from fscout.scraper.__init__ import _fetch_child_page
 
-        config = AppConfig(scraping=ScrapingConfig(browser_timeout=10))
-        resp = self._FakeResponse(200, "short")
+        config = AppConfig(scraping=ScrapingConfig(browser_timeout=1))
+        resp = self._FakeResponse(200, "<html><p>too short</p></html>")
 
-        with patch("aiohttp.ClientSession", return_value=self._FakeSession(resp)):
+        with patch("aiohttp.ClientSession", return_value=self._FakeSession(resp)), \
+             patch("fscout.scraper_graph._playwright_fetch", return_value=None):
             result = await _fetch_child_page("https://example.com/short", config)
             assert result is None
 
@@ -430,7 +431,8 @@ class TestFetchChildPage:
 
         config = AppConfig(scraping=ScrapingConfig(browser_timeout=10))
 
-        with patch("aiohttp.ClientSession", side_effect=RuntimeError("Connection refused")):
+        with patch("aiohttp.ClientSession", side_effect=RuntimeError("Connection refused")), \
+             patch("fscout.scraper_graph._playwright_fetch", return_value=None):
             result = await _fetch_child_page("https://invalid.com", config)
             assert result is None
 

@@ -326,8 +326,11 @@ async def run_pipeline(
         console.print("[bold]Writing results to Excel...[/]")
         for key, records in all_records.items():
             dept, uni = key.split("/", 1)
+            merged = _dedup_records(records, schema.dedup_keys)
+            if len(merged) < len(records):
+                console.print(f"  [dim]Dedup {uni}/{dept}: {len(records)} → {len(merged)}[/]")
             export_records(
-                records, schema, Path(config.files.output_excel),
+                merged, schema, Path(config.files.output_excel),
                 source_university=uni,
                 source_department=dept,
             )
@@ -351,3 +354,36 @@ def _fill_static_fields(rec: dict[str, Any], target: dict[str, Any], schema: Any
         if current is None or (isinstance(current, str) and current.strip() == ""):
             if col.value_from and col.value_from in meta:
                 rec[col.name] = meta[col.value_from]
+
+
+def _dedup_records(records: list[dict[str, Any]], dedup_keys: list[str]) -> list[dict[str, Any]]:
+    """Merge records that share the same values for all *dedup_keys* columns.
+
+    When two records match, the first non-empty value wins for every field.
+    """
+    if not dedup_keys:
+        return records
+
+    groups: dict[tuple, dict[str, Any]] = {}
+    for rec in records:
+        key_vals = tuple(str(rec.get(k, "") or "").strip() for k in dedup_keys)
+        if not any(key_vals):
+            groups[id(rec)] = rec
+            continue
+        if key_vals not in groups:
+            groups[key_vals] = rec
+        else:
+            existing = groups[key_vals]
+            for k, v in rec.items():
+                if v and not _is_empty(v) and _is_empty(existing.get(k)):
+                    existing[k] = v
+
+    return list(groups.values())
+
+
+def _is_empty(val: Any) -> bool:
+    if val is None:
+        return True
+    if isinstance(val, str) and val.strip() == "":
+        return True
+    return False
