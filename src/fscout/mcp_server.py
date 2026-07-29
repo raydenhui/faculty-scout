@@ -22,6 +22,7 @@ from . import agent_api
 
 try:
     from mcp.server.fastmcp import FastMCP
+    from mcp.server.transport_security import TransportSecuritySettings
 except ImportError as e:  # pragma: no cover
     raise SystemExit(
         "The 'mcp' package is required to run the MCP server.\n"
@@ -114,8 +115,26 @@ def _dump(result: dict[str, Any]) -> str:
 
 
 def main() -> None:
-    """Entry point for the ``fscout-mcp`` script (stdio transport)."""
-    mcp.run()
+    """Entry point for the ``fscout-mcp`` script.
+
+    Stdio transport by default.  Pass ``--sse`` for HTTP/SSE transport.
+    Options: ``--host HOST`` (default 0.0.0.0), ``--port PORT`` (default 8000).
+    """
+    import sys
+    if "--sse" in sys.argv:
+        for i, arg in enumerate(sys.argv):
+            if arg == "--host" and i + 1 < len(sys.argv):
+                mcp.settings.host = sys.argv[i + 1]
+            if arg == "--port" and i + 1 < len(sys.argv):
+                mcp.settings.port = int(sys.argv[i + 1])
+        if "--host" not in sys.argv:
+            mcp.settings.host = "0.0.0.0"
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+        )
+        mcp.run(transport="sse")
+    else:
+        mcp.run()
 
 
 if __name__ == "__main__":
