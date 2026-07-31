@@ -214,18 +214,18 @@ HTML:
         log.debug("%s response:\n%s", label, text)
     except Exception as e:
         log.warning("%s LLM call failed: %s", label, e)
-        return None
+        return ListingAnalysis({"page_error": f"LLM call failed: {e}"})
 
     m = _JSON_BLOCK_RE.search(text.strip())
     if not m:
         log.warning("%s no JSON found in response", label)
-        return None
+        return ListingAnalysis({"page_error": "LLM returned non-JSON response"})
 
     try:
         data = json.loads(m.group())
-    except json.JSONDecodeError:
-        log.warning("%s invalid JSON", label)
-        return None
+    except json.JSONDecodeError as e:
+        log.warning("%s invalid JSON: %s", label, e)
+        return ListingAnalysis({"page_error": f"LLM returned invalid JSON: {e}"})
 
     records = data.get("records", [])
     static_values = _unmap_static_values(data.get("static_values", {}), fwd)

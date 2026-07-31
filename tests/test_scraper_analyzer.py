@@ -271,22 +271,25 @@ class TestAnalyzeListingPage:
         assert result.page_error == "Cloudflare challenge detected"
 
     @pytest.mark.asyncio
-    async def test_llm_call_failure_returns_none(self, schema, mock_llm):
+    async def test_llm_call_failure_returns_error(self, schema, mock_llm):
         mock_llm.ainvoke.side_effect = RuntimeError("API error")
         result = await analyze_listing_page(mock_llm, "<html>test</html>", schema)
-        assert result is None
+        assert result is not None
+        assert result.page_error.startswith("LLM call failed")
 
     @pytest.mark.asyncio
-    async def test_no_json_in_response_returns_none(self, schema, mock_llm):
+    async def test_no_json_in_response_returns_error(self, schema, mock_llm):
         mock_llm.ainvoke.return_value = _fake_response("Just plain text, no JSON here.")
         result = await analyze_listing_page(mock_llm, "<html>test</html>", schema)
-        assert result is None
+        assert result is not None
+        assert "non-JSON" in result.page_error
 
     @pytest.mark.asyncio
-    async def test_invalid_json_returns_none(self, schema, mock_llm):
+    async def test_invalid_json_returns_error(self, schema, mock_llm):
         mock_llm.ainvoke.return_value = _fake_response('{"records": [}')
         result = await analyze_listing_page(mock_llm, "<html>test</html>", schema)
-        assert result is None
+        assert result is not None
+        assert "invalid json" in result.page_error.lower()
 
     @pytest.mark.asyncio
     async def test_static_values_unmapped(self, schema, mock_llm):
