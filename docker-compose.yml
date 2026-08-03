@@ -1,11 +1,14 @@
-# ---- docker-compose snippet for faculty-scout ----
-# Merge into your existing n8n docker-compose.yml
+# ---- docker-compose for faculty-scout ----
+#
+# Runs the REST API server by default on port 8000.
+# For the MCP server (SSE), set FSC_MODE=mcp or override the command.
 #
 # Startup:
 #   docker compose up -d --build faculty-scout
 #
-# n8n MCP Client config:
-#   URL: http://faculty-scout:8000/sse
+# n8n integration (same Docker network):
+#   REST:  POST http://faculty-scout:8000/api/run
+#   MCP:   http://faculty-scout:8000/sse  (when FSC_MODE=mcp)
 #
 
 services:
@@ -13,6 +16,8 @@ services:
     build: .
     container_name: faculty-scout
     restart: unless-stopped
+    environment:
+      FSC_MODE: ${FSC_MODE:-api}          # "api" or "mcp"
     ports:
       - "8000:8000"
     volumes:
@@ -23,7 +28,12 @@ services:
       - ./schema.json:/app/schema.json
       # Persist the cache across restarts
       - scout_cache:/app/cache
-    command: ["python", "-m", "fscout.mcp_server", "--sse", "--host", "0.0.0.0"]
+    command: >
+      sh -c 'if [ "$$FSC_MODE" = "mcp" ]; then
+        exec python -m fscout.mcp_server --sse --host 0.0.0.0 --port 8000;
+      else
+        exec python -m fscout.rest_api --host 0.0.0.0 --port 8000;
+      fi'
 
 volumes:
   scout_cache:

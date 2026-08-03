@@ -280,13 +280,52 @@ python -m fscout.mcp_server --sse --port 9000  # custom port
 | `get_results` | Extracted faculty records (filterable) |
 | `export_results` | Export records to JSON/Excel |
 
+### REST API
+
+```bash
+pip install "faculty-scout[api]"
+python -m fscout.rest_api --host 0.0.0.0 --port 8000
+# or
+fscout-api --port 9000
+```
+
+Every operation from the Python API is exposed over HTTP. Interactive docs at `http://localhost:8000/docs`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check |
+| GET | `/api/targets` | List all targets + status |
+| POST | `/api/targets` | Add a target |
+| GET | `/api/status` | Job statuses + summary |
+| GET | `/api/results` | Faculty records (filter by `university`/`department`) |
+| POST | `/api/discover` | Discover departments via LLM |
+| POST | `/api/run` | Run full pipeline (`{"force": bool}`) |
+| POST | `/api/clear-and-run` | Clear statuses, then run |
+| POST | `/api/export` | Export to JSON/Excel |
+
+Example (n8n HTTP Request node or curl):
+
+```bash
+curl -X POST http://localhost:8000/api/run \
+     -H "Content-Type: application/json" \
+     -d '{"force": false}'
+```
+
 ### Docker Deployment
 
 ```bash
 docker compose up -d --build faculty-scout
 ```
 
-The MCP server runs on `http://localhost:8000/sse` with auto-restart. Volume mounts for Excel files and cache. For n8n integration, add an MCP Client node pointing to `http://faculty-scout:8000/sse` (or `http://host.docker.internal:8000/sse` if n8n is on the host).
+The REST API server runs on `http://localhost:8000` with auto-restart. Set `FSC_MODE=mcp` to run the MCP (SSE) server instead:
+
+```bash
+FSC_MODE=mcp docker compose up -d --build faculty-scout
+```
+
+Volume mounts for Excel files and cache persist data across restarts. For n8n integration on the same Docker network:
+- **REST:** `POST http://faculty-scout:8000/api/run`
+- **MCP:** MCP Client node at `http://faculty-scout:8000/sse` (when `FSC_MODE=mcp`)
 
 ### dedup_keys
 

@@ -17,8 +17,8 @@ COPY schema.json config.yaml ./
 RUN pip install --no-cache-dir fastmcp \
     && python -c "from mcp.server.fastmcp import FastMCP; print('MCP OK')"
 
-RUN pip install --no-cache-dir .
-RUN python -m playwright install --with-deps chromium
+RUN pip install --no-cache-dir ".[mcp,api]" \
+    && python -m playwright install --with-deps chromium
 
 ENV PYTHONUNBUFFERED=1
 
@@ -26,4 +26,7 @@ RUN useradd --create-home appuser
 USER appuser
 
 EXPOSE 8000
-CMD ["python", "-m", "fscout.mcp_server", "--sse", "--host", "0.0.0.0"]
+EXPOSE 8080
+
+# Default: REST API server. Override CMD to run the MCP server instead.
+CMD ["python", "-m", "fscout.rest_api", "--host", "0.0.0.0", "--port", "8000"]
