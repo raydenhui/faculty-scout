@@ -1,10 +1,80 @@
 # Faculty Scout
 
-AI-driven CLI tool that scrapes university faculty information from listing pages and exports structured data to Excel.
+AI-driven web scraper that automatically extracts **university faculty directories** from public department listing pages and exports clean, structured data to Excel — no manual data entry.
 
-## Architecture
+**Faculty Scout** is an open-source academic data extraction tool built for researchers, administrators, and developers who need current professor and staff records. It uses large language models (LLMs) to understand the structure of any faculty listing page, then follows pagination and sub-category links to capture every member — names, titles, positions, emails, departments, and profile URLs. A **fully customizable schema** lets you define exactly which columns to extract, how they're validated, and how they're filled (scraped, static, or computed) — so the output Excel matches your exact requirements.
 
-Faculty Scout reads scrape targets from an Excel file, fetches listing pages, extracts faculty data via LLM, and writes results directly back to an output Excel file. There is no database — the Excel files are the sole source of truth.
+## What it does
+
+- **Faculty directory scraping** — extracts professors, lecturers, and academic staff from university websites
+- **Automated staff list extraction** — turns messy HTML listings into tidy Excel rows
+- **Multi-department crawling** — follows child pages, "next page" links, and category sub-pages automatically
+- **LLM-powered parsing** — understands arbitrary page structures without hand-written selectors
+- **Schema-driven output** — define columns (name, email, position, Chinese name, etc.) in `schema.json`
+- **Incremental updates** — re-scrapes only changed pages, so monthly refresh is cheap
+- **Deduplication & validation** — merges duplicate people and validates emails/names
+- **API, MCP & Docker ready** — REST API, MCP server, CLI, and containerized 24x7 deployment
+
+## Fully customizable schema — tailor the output to your needs
+
+Unlike one-size-fits-all scrapers, Faculty Scout is **driven by a schema you define**. You decide exactly which columns to extract, how each one is filled, and how strict its validation should be — no code changes required.
+
+```json
+{
+  "columns": [
+    { "name": "English Full Name", "type": "extracted", "hint": "The professor's full name in English", "required": true },
+    { "name": "Chinese Full Name",  "type": "extracted", "hint": "The professor's full name in Traditional Chinese", "validation": { "contains_cjk": true } },
+    { "name": "Position",           "type": "extracted", "hint": "Position or rank, e.g. Associate Professor" },
+    { "name": "Email",              "type": "extracted", "hint": "Email address", "required": true, "validation": { "regex": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$" } },
+    { "name": "Department",         "type": "fallback", "hint": "The official department name", "value_from": "department" },
+    { "name": "Institution",        "type": "static",   "value_from": "university_name" }
+  ],
+  "dedup_keys": ["Email"]
+}
+```
+
+Each column type controls **how** a value is produced:
+
+| Column type | How the value is filled |
+|-------------|--------------------------|
+| `extracted` | Pulled from the HTML by the LLM, guided by a natural-language `hint` |
+| `fallback` | LLM extraction first; falls back to a static value (e.g. department) if empty |
+| `static` | Always filled from metadata (e.g. the university name), never scraped |
+| `formula` | Computed by an Excel formula using other columns |
+
+Add fields, change hints, or tighten validation at any time — the scraper adapts automatically. Whether you need English-only contact lists, bilingual CJK name columns, custom email regexes, or department-level grouping, it's all configured in `schema.json`, not in code. See [Schema Configuration](#schema-configuration-schemajson) for the full reference.
+
+## Use cases
+
+- Building and maintaining **university faculty databases**
+- Tracking **academic staff directories** for accreditation, reporting, or research
+- Replicating **professor contact lists** (names, emails, departments) into a spreadsheet
+- Monitoring **faculty hiring and departures** over time with monthly automated runs
+- Powering faculty directories for internal systems via the REST API or MCP
+
+## Key terms
+
+web scraping · faculty scraper · staff directory extraction · university professor data · academic staff crawler · LLM data extraction · HTML-to-Excel · faculty listing parser · automated directory sync
+
+## How it works
+
+Faculty Scout reads scrape targets (university + department + URL) from an input Excel file, fetches each listing page, uses an LLM to extract every faculty member, follows pagination and child pages, and writes structured results directly back to an output Excel file. There is no database — the Excel files are the sole source of truth.
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| **Fully automated** | Scrape an entire university's faculty directory with one command |
+| **Any page structure** | LLM parses faculty listing HTML without custom selectors |
+| **Deep crawling** | Follows "next page", alphabetical, and category child links |
+| **Structured export** | Configurable columns → clean Excel output |
+| **Smart caching** | Skips unchanged pages across runs to cut LLM cost |
+| **Deduplication** | Merges duplicate people within and across departments |
+| **Validation** | Regex, length, and CJK checks per field |
+| **Required-field fallback** | Visits profile pages when a key field (e.g. email) is missing |
+| **REST API** | Trigger scraping and query results over HTTP |
+| **MCP support** | Connect AI agents (e.g. n8n) to the scrape pipeline |
+| **Docker-ready** | Run 24x7 with auto-restart for scheduled monthly updates |
 
 ```
 universities.xlsx  ──read──►  pipeline (in-memory)
@@ -35,6 +105,8 @@ Set `files.cache_enabled: false` to disable caching entirely.
 
 ## Schema Configuration (`schema.json`)
 
+The `schema.json` file is the heart of Faculty Scout's customizability. Every column you want in the output Excel is defined here, along with how it should be extracted and validated.
+
 ### Column Types
 
 | Type | Description |
@@ -45,6 +117,8 @@ Set `files.cache_enabled: false` to disable caching entirely.
 | `formula` | Excel formula using `[@[Column Name]]` syntax. |
 
 ### Column Attributes
+
+Add any of these to a column definition to control extraction, fallback, and validation:
 
 | Attribute | Applies to | Description |
 |-----------|------------|-------------|
