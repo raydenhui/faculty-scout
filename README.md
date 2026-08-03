@@ -24,9 +24,11 @@ Output rows are deduplicated using a hidden `_source_key` column containing `{de
 
 ### Caching
 
-Fetched page HTML is cached indefinitely (no expiry). On subsequent runs, pages whose content is unchanged from the cache are skipped — saving LLM cost and time. Two exceptions always force a fresh scrape regardless:
+Fetched page HTML is cached indefinitely (no expiry). On subsequent runs, a page whose content is **unchanged** from the cache is skipped — its `status` is set to `Skipped` in the input Excel instead of `completed`, saving LLM cost and time. Child/next pages are also compared against their caches before deciding to skip.
 
+A fresh scrape is forced in these cases:
 - **No existing records:** If the output Excel has no rows for a department (checked via the hidden `_source_key` column), the page is always scraped. This ensures new targets never get skipped.
+- **Child page changed:** If any child/next page differs from its cache, the whole department is re-scraped.
 - **`--force` flag:** Overrides all caching for the run.
 
 Set `files.cache_enabled: false` to disable caching entirely.
@@ -299,16 +301,45 @@ Every operation from the Python API is exposed over HTTP. Interactive docs at `h
 | GET | `/api/status` | Job statuses + summary |
 | GET | `/api/results` | Faculty records (filter by `university`/`department`) |
 | POST | `/api/discover` | Discover departments via LLM |
-| POST | `/api/run` | Run full pipeline (`{"force": bool}`) |
-| POST | `/api/clear-and-run` | Clear statuses, then run |
+| POST | `/api/run` | Start a background scrape job, returns `job_id` |
+| POST | `/api/clear-and-run` | Clear statuses, then start a background job |
+| GET | `/api/jobs` | List all jobs (most recent first) |
+| GET | `/api/jobs/{id}` | Job status/progress/result |
+| POST | `/api/jobs/{id}/stop` | Stop a running job |
 | POST | `/api/export` | Export to JSON/Excel |
 
-Example (n8n HTTP Request node or curl):
+### Async jobs (avoid HTTP timeouts)
+
+`/api/run` and `/api/clear-and-run` are long-running (scraping 100+ departments can take 30–90 min). They return a `job_id` immediately and run in the background, so n8n or a client polls instead of holding a blocking HTTP request:
 
 ```bash
+# Start a job
 curl -X POST http://localhost:8000/api/run \
      -H "Content-Type: application/json" \
      -d '{"force": false}'
+# → {"success": true, "data": {"job_id": "a1b2c3d4e5f6", "status": "running", "message": "Job started"}}
+
+# Poll until done
+curl http://localhost:8000/api/jobs/a1b2c3d4e5f6
+# running → {status: "running", done: 42, total: 266, message: "Processed 42/266 targets"}
+# done   → {status: "completed", result: {total, successful, failed, skipped}}
+
+# Stop a running job
+curl -X POST http://localhost:8000/api/jobs/a1b2c3d4e5f6/stop
+```
+
+Job status values: `running`, `stopping`, `stopped`, `completed`, `failed`.
+
+### n8n monthly workflow
+
+For a monthly full refresh, call `POST /api/clear-and-run`, then loop on `GET /api/jobs/{id}` until `status` is `completed` or `failed`:
+
+```
+n8n trigger (monthly)
+  → POST /api/clear-and-run                 # returns job_id (no timeout)
+  → LOOP until GET /api/jobs/{id} is completed/failed
+  → IF completed → copy faculty_data.xlsx to archive folder
+  → IF failed → alert
 ```
 
 ### Docker Deployment
@@ -326,6 +357,13 @@ FSC_MODE=mcp docker compose up -d --build faculty-scout
 Volume mounts for Excel files and cache persist data across restarts. For n8n integration on the same Docker network:
 - **REST:** `POST http://faculty-scout:8000/api/run`
 - **MCP:** MCP Client node at `http://faculty-scout:8000/sse` (when `FSC_MODE=mcp`)
+
+**Container hardening:** the server runs as the non-root `appuser`. An entrypoint runs as root only to `chown` the mounted volumes (Excel files + cache) and Playwright browsers, then drops privileges via `su`. Playwright browsers are installed to `/ms-playwright` (not `/root/.cache`) so the non-root user can read them. This fixes the common Docker issues:
+
+- **`unable to open database file`** — non-root user couldn't write to the root-owned `scout_cache` volume (diskcache uses SQLite). Resolved by `chown` in the entrypoint.
+- **`No page HTML available for scraping`** on JS-heavy pages — Playwright browsers were installed under `/root/.cache`, which `appuser` couldn't read. Resolved by installing to `/ms-playwright`.
+
+**JS-protected emails:** many university sites obfuscate emails with JavaScript that only decodes on user click (e.g. `<span id="e...">[javascript protected email address]</span>`). These cannot be recovered from either raw or rendered HTML, so the `Remark` field notes the email is JavaScript-protected.
 
 ### dedup_keys
 
