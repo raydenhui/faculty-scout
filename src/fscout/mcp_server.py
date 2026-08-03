@@ -85,6 +85,19 @@ async def run_scrape(
 
 
 @mcp.tool()
+async def clear_and_run(
+    force: bool = False,
+    config_path: str = _DEFAULT_CONFIG,
+) -> str:
+    """Clear all target statuses in the input Excel, then run the full pipeline.
+
+    Useful for a full re-scrape: resets every target to pending before scraping.
+    Returns {cleared: N, summary: {...}}.
+    """
+    return _dump(await agent_api.clear_and_run(config_path, force=force))
+
+
+@mcp.tool()
 async def get_status(config_path: str = _DEFAULT_CONFIG) -> str:
     """Get current job statuses, summary counts, and recent run history."""
     return _dump(await agent_api.get_status(config_path))

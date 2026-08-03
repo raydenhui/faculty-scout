@@ -55,6 +55,28 @@ async def run(
         cache.close()
 
 
+async def clear_and_run(
+    config_path: str = "config.yaml",
+    force: bool = False,
+) -> dict[str, Any]:
+    """Clear all target statuses in the input Excel, then run the full pipeline."""
+    cfg = load_config(config_path)
+    cache = CacheManager(cfg.files.cache_dir)
+    schema = load_schema(cfg.files.schema_file)
+
+    try:
+        from .pipeline import clear_all_status, run_pipeline
+
+        cleared = clear_all_status(cfg.files.input_excel)
+        summary = await run_pipeline(cfg, schema, cache, force=force)
+        return ok({"cleared": cleared, "summary": summary})
+    except Exception as e:
+        log.error("clear_and_run failed: %s", e)
+        return err("PIPELINE_ERROR", str(e))
+    finally:
+        cache.close()
+
+
 async def discover_departments(
     university: str,
     link: str | None = None,

@@ -114,11 +114,12 @@ class TestMcpModule:
     def test_fastmcp_app_exists(self) -> None:
         assert mcp.name == "fscout"
 
-    async def test_seven_tools_registered(self) -> None:
+    async def test_eight_tools_registered(self) -> None:
         tools = await mcp.list_tools()
         names = {t.name for t in tools}
         expected = {"add_target", "list_targets", "discover_departments",
-                    "run_scrape", "get_status", "get_results", "export_results"}
+                    "run_scrape", "get_status", "get_results", "export_results",
+                    "clear_and_run"}
         assert names == expected
 
     async def test_tool_input_schemas(self) -> None:

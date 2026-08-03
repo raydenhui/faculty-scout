@@ -156,13 +156,14 @@ The `required` attribute provides a schema-level override: if a field is marked 
 | `llm.provider` | `deepseek` | LLM provider (openai, deepseek, openai_compatible, azure, anthropic, google) |
 | `llm.model` | `deepseek-v4-flash` | Model name |
 | `llm.temperature` | `0.2` | Sampling temperature |
-| `llm.max_tokens` | `4096` | Max output tokens |
+| `llm.max_tokens` | `8192` | Max output tokens |
 | `search.provider` | `duckduckgo` | Search engine for URL discovery |
 | `scraping.headless` | `true` | Run Playwright in headless mode |
 | `scraping.browser_timeout` | `30` | Browser page load timeout (seconds) |
 | `scraping.max_concurrent_jobs` | `3` | Number of concurrent scrape targets |
 | `scraping.max_retries_per_step` | `3` | Retries per LangGraph node step |
 | `scraping.request_delay_sec` | `1.0` | Minimum delay between LLM requests |
+| `scraping.skip_children_if_records_ge` | `0` | Skip child pages if parent has ≥ N records (0=disabled) |
 | `files.cache_enabled` | `true` | Cache fetched HTML for skip-unchanged detection |
 | `department.discovery_enabled` | `true` | Auto-discover departments for university-only entries |
 
@@ -206,6 +207,10 @@ python -m fscout run --debug
 # Always re-scrape even if page content is unchanged
 python -m fscout run --force
 
+# Clear ALL statuses in universities.xlsx, then run every target fresh
+python -m fscout clear-and-run
+python -m fscout clear-and-run --force
+
 # Discover departments for university-only entries
 python -m fscout discover
 
@@ -217,6 +222,14 @@ python -m fscout export --format json --output faculty.json
 ```
 
 Clearing a row's `status` column in `universities.xlsx` will re-scrape it on the next run.
+
+### Error Handling
+
+If the LLM returns a non-JSON response (or the call fails), the target's `status` column is marked `failed: ...` instead of silently proceeding. This surfaces scraping problems in the input Excel for easy retry.
+
+### skip-children optimization
+
+When `scraping.skip_children_if_records_ge` is set (e.g. `20`), the scraper skips child/sub-category pages if the root listing page already returns ≥ 20 records — useful when a single page already lists all faculty members.
 
 ## AI Agent / Programmatic Usage
 
@@ -242,6 +255,7 @@ from fscout import agent_api
 
 await agent_api.run()
 await agent_api.run(force=True)
+await agent_api.clear_and_run()       # clear all statuses, then scrape everything
 await agent_api.discover_departments("HKU")
 await agent_api.export(fmt="json")
 ```
@@ -261,6 +275,7 @@ python -m fscout.mcp_server --sse --port 9000  # custom port
 | `list_targets` | List targets from the input Excel |
 | `discover_departments` | Discover departments for a university via LLM |
 | `run_scrape` | Run the full scrape pipeline |
+| `clear_and_run` | Clear all statuses, then run the full pipeline (full re-scrape) |
 | `get_status` | Job statuses + summary |
 | `get_results` | Extracted faculty records (filterable) |
 | `export_results` | Export records to JSON/Excel |
@@ -273,11 +288,7 @@ docker compose up -d --build faculty-scout
 
 The MCP server runs on `http://localhost:8000/sse` with auto-restart. Volume mounts for Excel files and cache. For n8n integration, add an MCP Client node pointing to `http://faculty-scout:8000/sse` (or `http://host.docker.internal:8000/sse` if n8n is on the host).
 
-### Configuration Reference
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `scraping.skip_children_if_records_ge` | `0` | Skip child pages if parent has ≥ N records (0=disabled) |
+### dedup_keys
 
 Schema `dedup_keys` merge records with matching values after each department scrape:
 

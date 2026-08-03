@@ -163,17 +163,42 @@ def _has_existing_records(output_path: str | Path, university: str, department: 
         return True
 
 
+def clear_all_status(excel_path: str | Path) -> int:
+    """Clear the status column for all rows in the input Excel. Returns rows cleared."""
+    path = Path(excel_path)
+    if not path.exists():
+        return 0
+
+    df = pd.read_excel(path, sheet_name=0)
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+
+    if _STATUS_COL not in df.columns:
+        return 0
+
+    n = int(df[_STATUS_COL].notna().sum())
+    df[_STATUS_COL] = None
+    df.columns = [c.replace("_", " ").title() for c in df.columns]
+    df.to_excel(path, index=False)
+    return n
+
+
 async def run_pipeline(
     config: AppConfig,
     schema: Schema,
     cache: CacheManager,
     force: bool = False,
+    clear_status: bool = False,
 ) -> dict[str, Any]:
     """Run all pending targets and export results incrementally. Returns summary dict."""
+    if clear_status:
+        cleared = clear_all_status(config.files.input_excel)
+        console = Console()
+        console.print(f"[yellow]Cleared status for {cleared} target rows.[/]")
+
     llm = get_llm(config.llm)
     console = Console()
-    log.info("pipeline start  provider=%s model=%s force=%s",
-             config.llm.provider, config.llm.model, force)
+    log.info("pipeline start  provider=%s model=%s force=%s clear_status=%s",
+             config.llm.provider, config.llm.model, force, clear_status)
 
     console.print("[bold blue]Pipeline[/] Loading input from Excel...")
     targets = read_targets(config.files.input_excel)
