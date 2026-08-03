@@ -188,8 +188,13 @@ async def run_pipeline(
     cache: CacheManager,
     force: bool = False,
     clear_status: bool = False,
+    progress_callback: Any = None,
 ) -> dict[str, Any]:
-    """Run all pending targets and export results incrementally. Returns summary dict."""
+    """Run all pending targets and export results incrementally. Returns summary dict.
+
+    ``progress_callback(done: int, total: int, msg: str)`` is invoked at phase
+    changes and after each target completes (optional).
+    """
     if clear_status:
         cleared = clear_all_status(config.files.input_excel)
         console = Console()
@@ -199,6 +204,13 @@ async def run_pipeline(
     console = Console()
     log.info("pipeline start  provider=%s model=%s force=%s clear_status=%s",
              config.llm.provider, config.llm.model, force, clear_status)
+
+    def _notify(done: int, total: int, msg: str) -> None:
+        if progress_callback:
+            try:
+                progress_callback(done, total, msg)
+            except Exception:
+                pass
 
     console.print("[bold blue]Pipeline[/] Loading input from Excel...")
     targets = read_targets(config.files.input_excel)
@@ -249,11 +261,14 @@ async def run_pipeline(
         console.print("[yellow]No pending scrape targets.[/]")
         return {"total": 0, "successful": 0, "failed": 0, "skipped": 0}
 
+    _notify(0, len(pending), "Starting scrape")
+
     semaphore = asyncio.Semaphore(config.scraping.max_concurrent_jobs)
     all_records: dict[str, list[dict[str, Any]]] = {}
     successful = 0
     failed = 0
     skipped = 0
+    _processed = 0
 
     with Progress(
         SpinnerColumn(),
@@ -266,7 +281,7 @@ async def run_pipeline(
         task = progress.add_task("[blue]Scraping...", total=len(pending))
 
         async def _process_target(t: dict[str, Any]) -> None:
-            nonlocal successful, failed, skipped
+            nonlocal successful, failed, skipped, _processed
             async with semaphore:
                 try:
                     from . import scraper_graph
@@ -342,6 +357,8 @@ async def run_pipeline(
                     failed += 1
                 finally:
                     progress.update(task, advance=1)
+                    _processed += 1
+                    _notify(_processed, len(pending), f"Processed {_processed}/{len(pending)} targets")
 
         scrape_tasks = [asyncio.create_task(_process_target(t)) for t in pending]
         await asyncio.gather(*scrape_tasks)
@@ -362,6 +379,7 @@ async def run_pipeline(
         console.print(f"  Wrote results for {len(all_records)} departments.")
 
     total = len(pending)
+    _notify(total, total, f"Done — {successful} successful, {failed} failed, {skipped} skipped")
     return {"total": total, "successful": successful, "failed": failed, "skipped": skipped}
 
 

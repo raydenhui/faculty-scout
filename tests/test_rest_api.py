@@ -93,6 +93,17 @@ class TestTargets:
 
 
 class TestRun:
+    def _wait_job(self, job_id: str) -> dict:
+        """Poll a job until it finishes (short timeout)."""
+        import time
+        for _ in range(20):
+            r = client.get(f"/api/jobs/{job_id}")
+            body = r.json()
+            if body["data"]["status"] in ("completed", "failed"):
+                return body
+            time.sleep(0.1)
+        raise AssertionError(f"job {job_id} did not finish in time")
+
     def test_run_empty_pending(self, api_env):
         r = client.post(
             "/api/run",
@@ -101,7 +112,12 @@ class TestRun:
         assert r.status_code == 200
         body = r.json()
         assert body["success"] is True
-        assert body["data"]["summary"]["total"] == 0
+        assert body["data"]["status"] == "running"
+        job_id = body["data"]["job_id"]
+
+        finished = self._wait_job(job_id)
+        assert finished["data"]["status"] == "completed"
+        assert finished["data"]["result"]["total"] == 0
 
     def test_clear_and_run_empty(self, api_env):
         r = client.post(
@@ -110,6 +126,37 @@ class TestRun:
         )
         assert r.status_code == 200
         assert r.json()["success"] is True
+
+    def test_job_not_found(self):
+        r = client.get("/api/jobs/nonexistent")
+        assert r.status_code == 404
+        assert r.json()["success"] is False
+
+    def test_list_jobs(self):
+        r = client.get("/api/jobs")
+        assert r.status_code == 200
+        assert r.json()["success"] is True
+        assert "jobs" in r.json()["data"]
+
+    def test_stop_nonexistent_job(self):
+        r = client.post("/api/jobs/nonexistent/stop")
+        assert r.status_code == 404
+        assert r.json()["success"] is False
+
+    def test_stop_completed_job(self, api_env):
+        # run empty pending → completes instantly
+        r = client.post(
+            "/api/run",
+            json={"force": False, "config_path": api_env["config"]},
+        )
+        job_id = r.json()["data"]["job_id"]
+        self._wait_job(job_id)
+
+        # stopping a non-running job is a no-op success
+        r = client.post(f"/api/jobs/{job_id}/stop")
+        assert r.status_code == 200
+        assert r.json()["success"] is True
+        assert r.json()["data"]["status"] in ("completed", "stopping", "stopped")
 
 
 class TestDiscover:
