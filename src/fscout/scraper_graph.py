@@ -36,6 +36,16 @@ _llm_log = get_llm_logger()
 # Module-level progress callback (not serialized, set per-invoke)
 _progress_callback: Any = None
 
+# Shared process-wide Playwright browser + HTTP session. Launching a fresh
+# Chromium (and its Node driver) per fetch caused resource exhaustion and
+# mid-run hangs; a single browser instance is reused instead.
+_playwright_driver: Any = None
+_shared_browser: Any = None
+_browser_lock = asyncio.Lock()
+_browser_sem = asyncio.Semaphore(2)
+
+_http_session: Any = None
+
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
@@ -495,10 +505,13 @@ async def fetch_page_html(url: str, config: AppConfig) -> str | None:
 
 
 async def _http_fetch(url: str, config: AppConfig) -> str | None:
+    global _http_session
     try:
         import aiohttp
 
-        async with aiohttp.ClientSession() as session, session.get(
+        if _http_session is None or _http_session.closed:
+            _http_session = aiohttp.ClientSession()
+        async with _http_session.get(
             url,
             timeout=aiohttp.ClientTimeout(total=config.scraping.browser_timeout),
         ) as resp:
@@ -509,21 +522,33 @@ async def _http_fetch(url: str, config: AppConfig) -> str | None:
     return None
 
 
-async def _playwright_fetch(url: str, config: AppConfig) -> str | None:
-    """Fetch page with Playwright. Skips headful retry for 404/410/5xx status codes."""
-    for attempt in range(2):
-        headless = config.scraping.headless and attempt == 0
-        try:
-            from playwright.async_api import async_playwright
+async def _get_shared_browser(config: AppConfig) -> Any:
+    """Return (creating once) a single Chromium for the whole process."""
+    global _playwright_driver, _shared_browser
+    if _shared_browser is not None:
+        return _shared_browser
+    async with _browser_lock:
+        if _shared_browser is not None:
+            return _shared_browser
+        from playwright.async_api import async_playwright
 
-            async with async_playwright() as pw:
-                browser = await pw.chromium.launch(
-                    headless=headless,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                    ] if headless else [],
-                )
+        _playwright_driver = await async_playwright().__aenter__()
+        _shared_browser = await _playwright_driver.chromium.launch(
+            headless=config.scraping.headless,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+            ] if config.scraping.headless else [],
+        )
+        return _shared_browser
+
+
+async def _playwright_fetch(url: str, config: AppConfig) -> str | None:
+    """Fetch page with the shared Playwright browser. Skips 404/410/5xx status codes."""
+    for attempt in range(2):
+        try:
+            async with _browser_sem:
+                browser = await _get_shared_browser(config)
                 context = await browser.new_context(
                     user_agent=(
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -533,51 +558,56 @@ async def _playwright_fetch(url: str, config: AppConfig) -> str | None:
                     viewport={"width": 1280, "height": 900},
                     locale="en-US",
                 )
-                page = await context.new_page()
                 try:
-                    response = await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
-                                               wait_until="domcontentloaded")
-                    http_status = response.status if response else 0
-                    if http_status in (404, 410):
-                        log.debug("_playwright_fetch HTTP %d, skipping: %s", http_status, url)
-                        return None
-                    if http_status >= 500:
-                        log.debug("_playwright_fetch HTTP %d server error, skipping: %s", http_status, url)
-                        return None
+                    page = await context.new_page()
+                    try:
+                        response = await page.goto(url, timeout=config.scraping.browser_timeout * 1000,
+                                                   wait_until="domcontentloaded")
+                        http_status = response.status if response else 0
+                        if http_status in (404, 410):
+                            log.debug("_playwright_fetch HTTP %d, skipping: %s", http_status, url)
+                            return None
+                        if http_status >= 500:
+                            log.debug("_playwright_fetch HTTP %d server error, skipping: %s", http_status, url)
+                            return None
 
-                    # Wait for JS-rendered content to appear
-                    content_selectors = [
-                        "tr[class]", "div[class*='people']", "div[class*='staff']",
-                        "div[class*='person']", "div[class*='profile']", ".member",
-                        "li[class]", "table[class]", "*[data-member]", "a[href*='mailto']",
-                    ]
-                    for sel in content_selectors:
-                        try:
-                            await page.wait_for_selector(sel, timeout=5_000)
-                            break
-                        except Exception:
+                        # Wait for JS-rendered content to appear
+                        content_selectors = [
+                            "tr[class]", "div[class*='people']", "div[class*='staff']",
+                            "div[class*='person']", "div[class*='profile']", ".member",
+                            "li[class]", "table[class]", "*[data-member]", "a[href*='mailto']",
+                        ]
+                        for sel in content_selectors:
+                            try:
+                                await page.wait_for_selector(sel, timeout=5_000)
+                                break
+                            except Exception:
+                                continue
+                        else:
+                            with contextlib.suppress(Exception):
+                                await page.wait_for_load_state("networkidle", timeout=8_000)
+                            await asyncio.sleep(3)
+                        await asyncio.sleep(2)
+                        html = await page.content()
+                        title = await page.title()
+                        is_blocked = (
+                            len(html) < 1000
+                            or "403" in title
+                            or "Forbidden" in title
+                            or "Just a moment" in title
+                            or "cf-browser-verification" in html[:2000]
+                        )
+                        if is_blocked and attempt == 0:
                             continue
-                    else:
+                        return html
+                    finally:
                         with contextlib.suppress(Exception):
-                            await page.wait_for_load_state("networkidle", timeout=8_000)
-                        await asyncio.sleep(3)
-                    await asyncio.sleep(2)
-                    html = await page.content()
-                    title = await page.title()
-                    is_blocked = (
-                        len(html) < 1000
-                        or "403" in title
-                        or "Forbidden" in title
-                        or "Just a moment" in title
-                        or "cf-browser-verification" in html[:2000]
-                    )
-                    if is_blocked and attempt == 0:
-                        continue
-                    return html
+                            await page.close()
                 finally:
-                    await browser.close()
+                    with contextlib.suppress(Exception):
+                        await context.close()
         except Exception:
-            if attempt == 0 and config.scraping.headless:
+            if attempt == 0:
                 continue
     return None
 

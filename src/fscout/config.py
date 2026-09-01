@@ -29,6 +29,8 @@ class LLMConfig(BaseModel):
     model: str = "gpt-4-turbo-preview"
     temperature: float = 0.2
     max_tokens: int = 4096
+    request_timeout: float = 120.0
+    max_retries: int = 2
     base_url: str = ""
     api_key: str = ""
     azure_endpoint: str = ""

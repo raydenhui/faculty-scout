@@ -258,3 +258,81 @@ def _rows_from_records(
             row[idx] = raw.replace("{row}", str(excel_row))
         new_data.append(row)
     return new_data
+
+
+def export_records_batch(
+    groups: list[tuple[str, str | None, list[dict[str, Any]]]],
+    schema: Schema,
+    output_path: Path,
+) -> int:
+    """Write many departments' records in a single workbook load/save.
+
+    Replaces the old per-department ``export_records`` loop that reloaded and
+    re-saved the whole file once per department (O(departments * file_size)).
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    headers = [_SOURCE_KEY_HEADER] + [c.name for c in schema.columns]
+    col_map = {c.name: i + 1 for i, c in enumerate(schema.columns)}
+    col_map[_SOURCE_KEY_HEADER] = 0
+    formula_cols = [(col_map[c.name], c) for c in schema.columns if c.is_formula()]
+    static_cols = [(col_map[c.name], c) for c in schema.columns if c.is_static()]
+
+    source_keys: set[str] = set()
+    new_rows: list[list[Any]] = []
+    for university, department, records in groups:
+        source_keys.add(_build_source_key(university, department))
+        new_rows.extend(
+            _rows_from_records(
+                records, headers, col_map, schema, static_cols, formula_cols,
+                university, department,
+            )
+        )
+
+    if output_path.exists() and source_keys:
+        _merge_incremental_many(output_path, headers, new_rows, source_keys)
+    else:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(headers)
+        for row in new_rows:
+            ws.append(row)
+        _hide_source_key_column(ws)
+        wb.save(output_path)
+
+    return len(new_rows)
+
+
+def _merge_incremental_many(
+    path: Path,
+    headers: list[str],
+    new_rows: list[list[Any]],
+    source_keys: set[str],
+) -> None:
+    """Remove rows whose ``_source_key`` is in *source_keys*, keep the rest, append new rows."""
+    wb = openpyxl.load_workbook(path)
+    ws = wb[wb.sheetnames[0]] if wb.sheetnames else wb.active
+
+    sk_col = _find_col(ws, _SOURCE_KEY_HEADER)
+
+    existing: list[list[Any]] = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not any(row):
+            continue
+        row_list = list(row)
+        if sk_col is not None and sk_col < len(row_list):
+            cell_val = row_list[sk_col]
+            if cell_val is not None and str(cell_val).strip() in source_keys:
+                continue
+        existing.append(row_list)
+
+    wb2 = openpyxl.Workbook()
+    ws2 = wb2.active
+    ws2.append(headers)
+    for row in existing:
+        ws2.append(row)
+    for row in new_rows:
+        ws2.append(row)
+    _hide_source_key_column(ws2)
+    wb2.save(path)
+    wb.close()

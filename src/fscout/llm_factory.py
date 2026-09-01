@@ -26,6 +26,8 @@ def get_llm(config: LLMConfig) -> BaseChatModel:
             "model": config.model,
             "temperature": config.temperature,
             "max_tokens": config.max_tokens,
+            "request_timeout": config.request_timeout,
+            "max_retries": config.max_retries,
         }
         if config.api_key:
             kwargs["api_key"] = config.api_key
@@ -48,6 +50,8 @@ def get_llm(config: LLMConfig) -> BaseChatModel:
             model=config.model,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
+            timeout=config.request_timeout,
+            max_retries=config.max_retries,
             api_key=config.api_key or None,
         )
 

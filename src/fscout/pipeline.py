@@ -17,7 +17,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 
 from .cache import CacheManager
 from .config import AppConfig
-from .exporter import _SOURCE_KEY_HEADER, export_records
+from .exporter import _SOURCE_KEY_HEADER, export_records_batch
 from .llm_factory import get_llm
 from .logging_config import get_logger
 from .schema import Schema
@@ -29,6 +29,68 @@ _UNI_COL = "university_name"
 _DEPT_COL = "department_name"
 _LINK_COL = "link"
 _STATUS_COL = "status"
+
+
+class _BatchWriter:
+    """Deferred Excel status updates to avoid repeated read/write cycles.
+
+    Collects status and link changes in memory and flushes them all at once
+    in a single Excel read/write, preventing 100% disk usage during long jobs.
+    """
+
+    def __init__(self, excel_path: str | Path) -> None:
+        self._path = Path(excel_path)
+        self._updates: list[tuple[str, str | None, str, str | None]] = []
+        self._append_depts: list[tuple[str, list[str]]] = []
+
+    def set_status(self, university: str, department: str | None, status: str, link: str | None = None) -> None:
+        self._updates.append((university, department, status, link))
+
+    def append_departments(self, university: str, departments: list[str]) -> None:
+        self._append_depts.append((university, departments))
+
+    def flush(self) -> None:
+        if not self._updates and not self._append_depts:
+            return
+        if not self._path.exists():
+            return
+
+        df = pd.read_excel(self._path, sheet_name=0)
+        df = df.where(pd.notna(df), None)
+        df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+
+        if self._updates:
+            if _STATUS_COL not in df.columns:
+                df[_STATUS_COL] = None
+            df[_STATUS_COL] = df[_STATUS_COL].astype(object)
+            if _LINK_COL not in df.columns:
+                df[_LINK_COL] = None
+            df[_LINK_COL] = df[_LINK_COL].astype(object)
+
+            for university, department, status, link in self._updates:
+                for idx, row in df.iterrows():
+                    row_uni = str(row[_UNI_COL]).strip()
+                    row_dept = None
+                    if _DEPT_COL in df.columns and row.get(_DEPT_COL) is not None:
+                        row_dept = str(row[_DEPT_COL]).strip()
+                        if row_dept.lower() in ("", "none", "null", "nan"):
+                            row_dept = None
+                    if row_uni == university and ((row_dept or "") == (department or "")):
+                        df.at[idx, _STATUS_COL] = status
+                        if link:
+                            df.at[idx, _LINK_COL] = link
+                        break
+
+        if self._append_depts:
+            for university, departments in self._append_depts:
+                for d in departments:
+                    new_row = pd.DataFrame([{_UNI_COL: university, _DEPT_COL: d}])
+                    df = pd.concat([df, new_row], ignore_index=True)
+
+        df.columns = [c.replace("_", " ").title() for c in df.columns]
+        df.to_excel(self._path, index=False)
+        self._updates.clear()
+        self._append_depts.clear()
 
 
 def read_targets(excel_path: str | Path) -> list[dict[str, Any]]:
@@ -196,7 +258,7 @@ async def run_pipeline(
     changes and after each target completes (optional).
     """
     if clear_status:
-        cleared = clear_all_status(config.files.input_excel)
+        cleared = await asyncio.to_thread(clear_all_status, config.files.input_excel)
         console = Console()
         console.print(f"[yellow]Cleared status for {cleared} target rows.[/]")
 
@@ -213,13 +275,14 @@ async def run_pipeline(
                 pass
 
     console.print("[bold blue]Pipeline[/] Loading input from Excel...")
-    targets = read_targets(config.files.input_excel)
+    targets = await asyncio.to_thread(read_targets, config.files.input_excel)
     console.print(f"  Loaded {len(targets)} targets from {config.files.input_excel}.")
 
     if not targets:
         console.print("[yellow]No targets to process.[/]")
         return {"total": 0, "successful": 0, "failed": 0, "skipped": 0}
 
+    writer = _BatchWriter(config.files.input_excel)
     agent = build_agent_graph(config, schema, llm, cache, checkpointer=None,
                               force_rescrape=force)
 
@@ -240,17 +303,29 @@ async def run_pipeline(
                 result = await agent.ainvoke(state)
                 departments = result.get("discovered_departments", [])
                 console.print(f"  Found {len(departments)} departments")
-                _set_excel_status(config.files.input_excel, t["university"], None,
-                                  "completed", link=result.get("page_url", ""))
+                writer.set_status(t["university"], None, "completed",
+                                  link=result.get("page_url", ""))
                 if departments:
-                    _append_departments_to_excel(config.files.input_excel, t["university"], departments)
+                    writer.append_departments(t["university"], departments)
                     discovery_count += 1
             except Exception as e:
                 console.print(f"[red]Discovery failed[/] {t['university']}: {e}")
 
     if discovery_count:
+        await asyncio.to_thread(writer.flush)
         console.print(f"  Discovered departments for {discovery_count} universities. Reloading targets...")
-        targets = read_targets(config.files.input_excel)
+        targets = await asyncio.to_thread(read_targets, config.files.input_excel)
+
+    # ---- Build cache of existing source keys in output Excel ----
+    existing_keys: set[str] = set()
+    output_path_obj = Path(config.files.output_excel)
+    if output_path_obj.exists():
+        try:
+            df_out = await asyncio.to_thread(pd.read_excel, output_path_obj, sheet_name=0)
+            if _SOURCE_KEY_HEADER in df_out.columns:
+                existing_keys = set(df_out[_SOURCE_KEY_HEADER].astype(str).str.strip().tolist())
+        except Exception:
+            pass
 
     # ---- Scrape phase ----
     scrape_targets = [t for t in targets if t["department"] is not None]
@@ -292,9 +367,8 @@ async def run_pipeline(
                     )
 
                     # Force rescrape if no existing records for this dept in output Excel
-                    should_force = force or not _has_existing_records(
-                        config.files.output_excel, t["university"], t["department"]
-                    )
+                    target_key = f"{t['department']}/{t['university']}"
+                    should_force = force or target_key not in existing_keys
 
                     state: dict[str, Any] = {
                         "university": t["university"],
@@ -310,8 +384,7 @@ async def run_pipeline(
                         progress.console.print(
                             f"[dim]Skipped[/] {t['university']}/{t['department']}: page unchanged"
                         )
-                        _set_excel_status(config.files.input_excel, t["university"],
-                                          t["department"], "Skipped")
+                        writer.set_status(t["university"], t["department"], "Skipped")
                         skipped += 1
                         progress.update(task, advance=1)
                         return
@@ -329,8 +402,8 @@ async def run_pipeline(
                         progress.console.print(
                             f"[red]Failed[/] {t['university']}/{t['department']}: {graph_error}"
                         )
-                        _set_excel_status(config.files.input_excel, t["university"],
-                                          t["department"], f"failed: {graph_error}",
+                        writer.set_status(t["university"], t["department"],
+                                          f"failed: {graph_error}",
                                           link=result.get("listing_url") or "")
                         failed += 1
                         progress.update(task, advance=1)
@@ -344,16 +417,15 @@ async def run_pipeline(
                         f"[green]Scraped[/] {t['university']}/{t['department']}: {len(records)} faculty"
                     )
 
-                    _set_excel_status(config.files.input_excel, t["university"],
-                                      t["department"], "completed",
+                    writer.set_status(t["university"], t["department"], "completed",
                                       link=result.get("listing_url") or "")
 
                 except Exception as e:
                     progress.console.print(
                         f"[red]Scrape failed[/] {t['university']}/{t['department']}: {e}"
                     )
-                    _set_excel_status(config.files.input_excel, t["university"],
-                                      t["department"], f"failed: {str(e)[:100]}")
+                    writer.set_status(t["university"], t["department"],
+                                      f"failed: {str(e)[:100]}")
                     failed += 1
                 finally:
                     progress.update(task, advance=1)
@@ -363,19 +435,22 @@ async def run_pipeline(
         scrape_tasks = [asyncio.create_task(_process_target(t)) for t in pending]
         await asyncio.gather(*scrape_tasks)
 
+    # ---- Flush all deferred status updates ----
+    await asyncio.to_thread(writer.flush)
+
     # ---- Write all results incrementally to Excel ----
     if all_records:
         console.print("[bold]Writing results to Excel...[/]")
+        groups: list[tuple[str, str | None, list[dict[str, Any]]]] = []
         for key, records in all_records.items():
             dept, uni = key.split("/", 1)
             merged = _dedup_records(records, schema.dedup_keys)
             if len(merged) < len(records):
                 console.print(f"  [dim]Dedup {uni}/{dept}: {len(records)} → {len(merged)}[/]")
-            export_records(
-                merged, schema, Path(config.files.output_excel),
-                source_university=uni,
-                source_department=dept,
-            )
+            groups.append((uni, dept, merged))
+        await asyncio.to_thread(
+            export_records_batch, groups, schema, Path(config.files.output_excel)
+        )
         console.print(f"  Wrote results for {len(all_records)} departments.")
 
     total = len(pending)
